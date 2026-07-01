@@ -8,7 +8,7 @@ namespace EarlySignalSystem.Services;
 
 public class DataCollectorService : IDataCollectorService
 {
-    private const string EurLexRssUrl = "https://eur-lex.europa.eu/eur-lex-news.rss";
+    private const string EurLexRssUrl = "https://eur-lex.europa.eu/rss.xml?type=branch&hitsPerPage=10&NC=OJ_L";
     private const string EurLexSource = "EUR-Lex";
     private const string LegislationSignalType = "Legislation";
 
