@@ -1,15 +1,32 @@
 using EarlySignalSystem.Components;
 using EarlySignalSystem.Data;
+using EarlySignalSystem.Services;
+using Hangfire;
 using Microsoft.EntityFrameworkCore;
+using MudBlazor.Services;
 
 var builder = WebApplication.CreateBuilder(args);
+
+var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
 
 // Add services to the container.
 builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents();
 
+builder.Services.AddMudServices();
+
 builder.Services.AddDbContext<AppDbContext>(options =>
-    options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
+    options.UseSqlServer(connectionString));
+
+builder.Services.AddHttpClient<IDataCollectorService, DataCollectorService>();
+
+builder.Services.AddHangfire(config => config
+    .SetDataCompatibilityLevel(CompatibilityLevel.Version_180)
+    .UseSimpleAssemblyNameTypeSerializer()
+    .UseRecommendedSerializerSettings()
+    .UseSqlServerStorage(connectionString));
+
+builder.Services.AddHangfireServer();
 
 var app = builder.Build();
 
@@ -29,5 +46,12 @@ app.UseAntiforgery();
 app.MapStaticAssets();
 app.MapRazorComponents<App>()
     .AddInteractiveServerRenderMode();
+
+app.MapHangfireDashboard();
+
+RecurringJob.AddOrUpdate<IDataCollectorService>(
+    "eur-lex-data-collector",
+    service => service.CollectEurLexSignalsAsync(CancellationToken.None),
+    "0 18 * * *");
 
 app.Run();

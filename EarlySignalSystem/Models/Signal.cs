@@ -4,6 +4,7 @@ public class Signal
 {
     public int Id { get; set; }
     public string Source { get; set; } = string.Empty;
+    public string SignalType { get; set; } = string.Empty;
     public string SourceUrl { get; set; } = string.Empty;
     public string Title { get; set; } = string.Empty;
     public string? RawContent { get; set; }
