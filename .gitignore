@@ -15,6 +15,9 @@ obj/
 .vscode/
 *.swp
 
+## Auto-generated
+.github/
+
 ## OS
 .DS_Store
 Thumbs.db
