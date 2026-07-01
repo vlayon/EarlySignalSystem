@@ -19,6 +19,7 @@ builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseSqlServer(connectionString));
 
 builder.Services.AddHttpClient<IDataCollectorService, DataCollectorService>();
+builder.Services.AddHttpClient<IAiAnalyzerService, AiAnalyzerService>();
 
 builder.Services.AddHangfire(config => config
     .SetDataCompatibilityLevel(CompatibilityLevel.Version_180)
@@ -53,5 +54,10 @@ RecurringJob.AddOrUpdate<IDataCollectorService>(
     "eur-lex-data-collector",
     service => service.CollectEurLexSignalsAsync(CancellationToken.None),
     "0 18 * * *");
+
+RecurringJob.AddOrUpdate<IAiAnalyzerService>(
+    "ai-signal-analyzer",
+    service => service.AnalyzeSignalsAsync(CancellationToken.None),
+    "30 18 * * *");
 
 app.Run();
