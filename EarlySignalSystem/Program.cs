@@ -58,6 +58,26 @@ RecurringJob.AddOrUpdate<IDataCollectorService>(
     service => service.CollectEurLexSignalsAsync(CancellationToken.None),
     "0 18 * * *");
 
+RecurringJob.AddOrUpdate<IDataCollectorService>(
+    "sec-edgar-collector",
+    service => service.CollectSecEdgarSignalsAsync(CancellationToken.None),
+    "10 18 * * *");
+
+RecurringJob.AddOrUpdate<IDataCollectorService>(
+    "ted-collector",
+    service => service.CollectTedSignalsAsync(CancellationToken.None),
+    "15 18 * * *");
+
+RecurringJob.AddOrUpdate<IDataCollectorService>(
+    "oecd-collector",
+    service => service.CollectOecdSignalsAsync(CancellationToken.None),
+    "20 18 * * *");
+
+RecurringJob.AddOrUpdate<IDataCollectorService>(
+    "esma-collector",
+    service => service.CollectEsmaSignalsAsync(CancellationToken.None),
+    "25 18 * * *");
+
 RecurringJob.AddOrUpdate<IAiAnalyzerService>(
     "ai-signal-analyzer",
     service => service.AnalyzeSignalsAsync(CancellationToken.None),
