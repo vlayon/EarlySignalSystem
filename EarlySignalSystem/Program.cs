@@ -15,8 +15,11 @@ builder.Services.AddRazorComponents()
 
 builder.Services.AddMudServices();
 
-builder.Services.AddDbContext<AppDbContext>(options =>
+builder.Services.AddDbContextFactory<AppDbContext>(options =>
     options.UseSqlServer(connectionString));
+
+builder.Services.AddScoped<AppDbContext>(sp =>
+    sp.GetRequiredService<IDbContextFactory<AppDbContext>>().CreateDbContext());
 
 builder.Services.AddHttpClient<IDataCollectorService, DataCollectorService>();
 builder.Services.AddHttpClient<IAiAnalyzerService, AiAnalyzerService>();

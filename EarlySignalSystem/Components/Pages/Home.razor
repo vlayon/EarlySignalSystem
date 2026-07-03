@@ -1,7 +1,137 @@
-﻿@page "/"
+@page "/"
+@rendermode InteractiveServer
+@using EarlySignalSystem.Data
+@using EarlySignalSystem.Models
+@using Microsoft.EntityFrameworkCore
+@inject IDbContextFactory<AppDbContext> DbContextFactory
 
-<PageTitle>Home</PageTitle>
+<PageTitle>Early Signal Dashboard</PageTitle>
 
-<h1>Hello, world!</h1>
+<MudContainer MaxWidth="MaxWidth.Large" Class="py-6">
+    <MudStack Row="true" Justify="Justify.SpaceBetween" AlignItems="AlignItems.Center" Class="mb-6">
+        <MudText Typo="Typo.h4" Style="font-weight:700;">Early Signal Dashboard</MudText>
+        @if (_lastScan is not null)
+        {
+            <MudText Typo="Typo.body2" Class="mud-text-secondary">Last scan: @_lastScan.Value.ToString("dd MMM yyyy, HH:mm")</MudText>
+        }
+    </MudStack>
 
-Welcome to your new app.
+    @if (_loading)
+    {
+        <MudProgressCircular Indeterminate="true" Color="Color.Primary" />
+    }
+    else if (_sectorScores.Count == 0)
+    {
+        <MudAlert Severity="Severity.Info">No signals analyzed yet for today. Next scan at 18:00.</MudAlert>
+    }
+    else
+    {
+        @foreach (var sector in _sectorScores)
+        {
+            <MudCard Class="mb-6" Style="background:#1a1d2e;">
+                <MudCardHeader>
+                    <CardHeaderContent>
+                        <MudStack Row="true" Spacing="3" AlignItems="AlignItems.Center">
+                            <MudText Typo="Typo.h5" Style="font-weight:600;">@sector.SectorName</MudText>
+                            <MudChip T="string" Color="@GetScoreColor(sector.Score)" Variant="Variant.Filled" Size="Size.Small">
+                                @sector.Score.ToString("0.0")
+                            </MudChip>
+                        </MudStack>
+                    </CardHeaderContent>
+                </MudCardHeader>
+                <MudCardContent>
+                    @if (_picksBySector.TryGetValue(sector.SectorName, out var picks) && picks.Count > 0)
+                    {
+                        <MudGrid>
+                            @foreach (var pick in picks)
+                            {
+                                <MudItem xs="12" sm="6" md="4">
+                                    <MudCard Style="background:#20243a; height:100%;">
+                                        <MudCardContent>
+                                            <MudStack Row="true" Justify="Justify.SpaceBetween" AlignItems="AlignItems.Start">
+                                                <MudStack Spacing="0">
+                                                    <MudText Typo="Typo.h6" Style="font-weight:700;">@pick.Ticker</MudText>
+                                                    <MudText Typo="Typo.body2" Class="mud-text-secondary">@pick.CompanyName</MudText>
+                                                </MudStack>
+                                                <MudChip T="string" Color="@GetScoreColor(pick.ConfidenceScore)" Variant="Variant.Filled" Size="Size.Small">
+                                                    @pick.ConfidenceScore.ToString("0.0")
+                                                </MudChip>
+                                            </MudStack>
+
+                                            <MudText Typo="Typo.body2" Class="mt-3">
+                                                @(IsExpanded(pick.Id) ? pick.Rationale : Truncate(pick.Rationale))
+                                            </MudText>
+
+                                            <MudIconButton Icon="@(IsExpanded(pick.Id) ? Icons.Material.Filled.ExpandLess : Icons.Material.Filled.ExpandMore)"
+                                                           Size="Size.Small"
+                                                           OnClick="() => ToggleExpand(pick.Id)" />
+                                        </MudCardContent>
+                                    </MudCard>
+                                </MudItem>
+                            }
+                        </MudGrid>
+                    }
+                </MudCardContent>
+            </MudCard>
+        }
+    }
+</MudContainer>
+
+@code {
+    private bool _loading = true;
+    private DateTime? _lastScan;
+    private List<SectorScore> _sectorScores = [];
+    private Dictionary<string, List<CompanyPick>> _picksBySector = [];
+    private readonly HashSet<int> _expandedIds = [];
+
+    protected override async Task OnInitializedAsync()
+    {
+        await using var dbContext = await DbContextFactory.CreateDbContextAsync();
+
+        var today = DateTime.Today;
+
+        _sectorScores = await dbContext.SectorScores
+            .Where(s => s.ScoredAt >= today && s.ScoredAt < today.AddDays(1))
+            .OrderByDescending(s => s.Score)
+            .ToListAsync();
+
+        var picks = await dbContext.CompanyPicks
+            .Where(c => c.PickedAt >= today && c.PickedAt < today.AddDays(1))
+            .ToListAsync();
+
+        _picksBySector = picks
+            .GroupBy(c => c.Sector)
+            .ToDictionary(g => g.Key, g => g.OrderByDescending(c => c.ConfidenceScore).ToList());
+
+        _lastScan = _sectorScores.Count > 0 ? _sectorScores.Max(s => s.ScoredAt) : null;
+
+        _loading = false;
+    }
+
+    private static Color GetScoreColor(decimal score) => score switch
+    {
+        >= 70 => Color.Success,
+        >= 40 => Color.Warning,
+        _ => Color.Error,
+    };
+
+    private static string Truncate(string? rationale)
+    {
+        if (string.IsNullOrEmpty(rationale))
+        {
+            return string.Empty;
+        }
+
+        return rationale.Length <= 120 ? rationale : rationale[..120] + "...";
+    }
+
+    private bool IsExpanded(int pickId) => _expandedIds.Contains(pickId);
+
+    private void ToggleExpand(int pickId)
+    {
+        if (!_expandedIds.Add(pickId))
+        {
+            _expandedIds.Remove(pickId);
+        }
+    }
+}
