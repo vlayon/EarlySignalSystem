@@ -347,7 +347,7 @@ public class DataCollectorService : IDataCollectorService
 
     private const string TedSource = "TED";
     private const string GovernmentContractSignalType = "GovernmentContract";
-    private const string TedApiUrl = "https://ted.europa.eu/api/v3.0/notices/search";
+    private const string TedApiUrl = "https://api.ted.europa.eu/v3/notices/search";
     private const decimal MinContractValueEur = 1_000_000m;
 
     public async Task<int> CollectTedSignalsAsync(CancellationToken cancellationToken = default)
@@ -372,7 +372,7 @@ public class DataCollectorService : IDataCollectorService
 
             foreach (var notice in notices)
             {
-                var sourceUrl = $"https://ted.europa.eu/en/notice/{notice.NoticeId}";
+                var sourceUrl = notice.NoticeUrl ?? $"https://ted.europa.eu/en/notice/{notice.NoticeId}";
                 if (existingLinks.Contains(sourceUrl) || notice.ValueEur is null || notice.ValueEur < MinContractValueEur)
                 {
                     continue;
@@ -418,11 +418,11 @@ public class DataCollectorService : IDataCollectorService
         var yesterday = DateTime.UtcNow.AddDays(-1).ToString("yyyyMMdd", CultureInfo.InvariantCulture);
         var requestBody = new
         {
-            query = $"ND=[0-9]* AND PD>={yesterday}",
-            fields = new[] { "ND", "TI", "AC", "CY", "DT", "TV" },
+            query = $"PD>={yesterday}",
+            fields = new[] { "ND", "TI", "CY", "DT", "TV" },
             page = 1,
-            pageSize = 100,
-            paginationMode = "PAGE"
+            limit = 100,
+            paginationMode = "PAGE_NUMBER"
         };
 
         using var response = await _httpClient.PostAsJsonAsync(TedApiUrl, requestBody, cancellationToken);
@@ -439,28 +439,28 @@ public class DataCollectorService : IDataCollectorService
 
         foreach (var notice in noticesElement.EnumerateArray())
         {
-            var noticeId = GetTedFieldValue(notice, "ND");
+            var noticeId = GetTedScalarValue(notice, "ND");
             if (string.IsNullOrWhiteSpace(noticeId))
             {
                 continue;
             }
 
-            var title = GetTedFieldValue(notice, "TI") ?? string.Empty;
-            var country = GetTedFieldValue(notice, "CY");
-            var publishedAt = DateTime.TryParseExact(GetTedFieldValue(notice, "DT"), "yyyyMMdd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsedDate)
-                ? parsedDate
+            var title = GetTedTitle(notice) ?? string.Empty;
+            var country = GetTedScalarValue(notice, "CY");
+            var publishedAt = DateTimeOffset.TryParse(GetTedScalarValue(notice, "DT"), CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsedDate)
+                ? parsedDate.UtcDateTime
                 : DateTime.UtcNow;
-            var valueEur = ParseTedValue(GetTedFieldValue(notice, "TV"));
+            var valueEur = ParseTedValue(GetTedScalarValue(notice, "TV"));
+            var noticeUrl = GetTedNoticeUrl(notice);
 
-            notices.Add(new TedNotice(noticeId, title, valueEur, country, publishedAt));
+            notices.Add(new TedNotice(noticeId, title, valueEur, country, publishedAt, noticeUrl));
         }
 
         return notices;
     }
 
-    // Notice полетата в TED search API могат да са скаларни или масиви (multilingual/multi-value) —
-    // според задачата TI[0] е заглавието, затова четем първия елемент, ако полето е масив.
-    private static string? GetTedFieldValue(JsonElement notice, string propertyName)
+    // ND/CY/DT/TV идват като скалар или еднoелементен масив в зависимост от полето — четем първия елемент, ако е масив.
+    private static string? GetTedScalarValue(JsonElement notice, string propertyName)
     {
         if (!notice.TryGetProperty(propertyName, out var value))
         {
@@ -480,6 +480,37 @@ public class DataCollectorService : IDataCollectorService
         };
     }
 
+    // TI не е масив, а обект keyed по ISO 639-2 езиков код (напр. "eng", "fra"...) — предпочитаме английски,
+    // иначе вземаме първия наличен превод.
+    private static string? GetTedTitle(JsonElement notice)
+    {
+        if (!notice.TryGetProperty("TI", out var titles) || titles.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        if (titles.TryGetProperty("eng", out var englishTitle) && englishTitle.ValueKind == JsonValueKind.String)
+        {
+            return englishTitle.GetString();
+        }
+
+        return titles.EnumerateObject().FirstOrDefault().Value.GetString();
+    }
+
+    // Всеки notice носи собствени permalink-ове (links.html.ENG) — по-надеждни от ръчно конструиран URL.
+    private static string? GetTedNoticeUrl(JsonElement notice)
+    {
+        if (notice.TryGetProperty("links", out var links) &&
+            links.TryGetProperty("html", out var html) &&
+            html.TryGetProperty("ENG", out var englishHtmlLink) &&
+            englishHtmlLink.ValueKind == JsonValueKind.String)
+        {
+            return englishHtmlLink.GetString();
+        }
+
+        return null;
+    }
+
     private static decimal? ParseTedValue(string? raw)
     {
         if (string.IsNullOrWhiteSpace(raw))
@@ -491,7 +522,7 @@ public class DataCollectorService : IDataCollectorService
         return decimal.TryParse(normalized, NumberStyles.Any, CultureInfo.InvariantCulture, out var value) ? value : null;
     }
 
-    private sealed record TedNotice(string NoticeId, string Title, decimal? ValueEur, string? Country, DateTime PublishedAt);
+    private sealed record TedNotice(string NoticeId, string Title, decimal? ValueEur, string? Country, DateTime PublishedAt, string? NoticeUrl);
 
     private const string OecdSource = "OECD";
     private const string BudgetChangeSignalType = "BudgetChange";
