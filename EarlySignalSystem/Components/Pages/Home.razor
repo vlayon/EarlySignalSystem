@@ -16,6 +16,41 @@
         }
     </MudStack>
 
+    <MudText Typo="Typo.h5" Style="font-weight:600;" Class="mb-3">Quick Shortlist</MudText>
+
+    @if (_loading)
+    {
+        <MudProgressCircular Indeterminate="true" Color="Color.Primary" Class="mb-6" />
+    }
+    else if (_quickShortlist.Count == 0)
+    {
+        <MudAlert Severity="Severity.Info" Class="mb-6">Shortlist is being calculated. Check back after 19:00.</MudAlert>
+    }
+    else
+    {
+        <MudGrid Class="mb-3">
+            @foreach (var entry in _quickShortlist)
+            {
+                <MudItem xs="12" sm="6" md="4">
+                    <MudCard Style="background:#1a1d2e; height:100%;">
+                        <MudCardContent>
+                            <MudStack Row="true" Justify="Justify.SpaceBetween" AlignItems="AlignItems.Start">
+                                <MudStack Spacing="0">
+                                    <MudText Typo="Typo.h6" Style="font-weight:700;">@entry.Ticker</MudText>
+                                    <MudText Typo="Typo.body2" Class="mud-text-secondary">@entry.CompanyName</MudText>
+                                </MudStack>
+                                <MudChip T="string" Color="@GetScoreColor(entry.Score)" Variant="Variant.Filled" Size="Size.Small">
+                                    @entry.Score.ToString("0.0")
+                                </MudChip>
+                            </MudStack>
+                        </MudCardContent>
+                    </MudCard>
+                </MudItem>
+            }
+        </MudGrid>
+        <MudButton Variant="Variant.Text" Color="Color.Primary" Href="/shortlist" Class="mb-6">See full shortlist →</MudButton>
+    }
+
     @if (_loading)
     {
         <MudProgressCircular Indeterminate="true" Color="Color.Primary" />
@@ -82,11 +117,17 @@
     private DateTime? _lastScan;
     private List<SectorScore> _sectorScores = [];
     private Dictionary<string, List<CompanyPick>> _picksBySector = [];
+    private List<CumulativeScore> _quickShortlist = [];
     private readonly HashSet<int> _expandedIds = [];
 
     protected override async Task OnInitializedAsync()
     {
         await using var dbContext = await DbContextFactory.CreateDbContextAsync();
+
+        _quickShortlist = await dbContext.CumulativeScores
+            .OrderByDescending(s => s.Score)
+            .Take(3)
+            .ToListAsync();
 
         var today = DateTime.Today;
 

@@ -23,6 +23,7 @@ builder.Services.AddScoped<AppDbContext>(sp =>
 
 builder.Services.AddHttpClient<IDataCollectorService, DataCollectorService>();
 builder.Services.AddHttpClient<IAiAnalyzerService, AiAnalyzerService>();
+builder.Services.AddScoped<ICumulativeScoringService, CumulativeScoringService>();
 
 builder.Services.AddHangfire(config => config
     .SetDataCompatibilityLevel(CompatibilityLevel.Version_180)
@@ -82,5 +83,10 @@ RecurringJob.AddOrUpdate<IAiAnalyzerService>(
     "ai-signal-analyzer",
     service => service.AnalyzeSignalsAsync(CancellationToken.None),
     "30 18 * * *");
+
+RecurringJob.AddOrUpdate<ICumulativeScoringService>(
+    "cumulative-scorer",
+    service => service.CalculateScoresAsync(CancellationToken.None),
+    "0 19 * * *");
 
 app.Run();

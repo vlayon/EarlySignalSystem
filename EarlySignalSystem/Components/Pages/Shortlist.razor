@@ -1,0 +1,180 @@
+@page "/shortlist"
+@rendermode InteractiveServer
+@using EarlySignalSystem.Data
+@using EarlySignalSystem.Models
+@using Microsoft.EntityFrameworkCore
+@inject IDbContextFactory<AppDbContext> DbContextFactory
+
+<PageTitle>Investment Shortlist</PageTitle>
+
+<MudContainer MaxWidth="MaxWidth.Large" Class="py-6">
+    <MudStack Row="true" Justify="Justify.SpaceBetween" AlignItems="AlignItems.Center" Class="mb-6">
+        <MudStack Spacing="0">
+            <MudText Typo="Typo.h4" Style="font-weight:700;">Investment Shortlist</MudText>
+            <MudText Typo="Typo.body2" Class="mud-text-secondary">Top companies by cumulative signal strength · Last 14 days</MudText>
+        </MudStack>
+        @if (_lastCalculatedAt is not null)
+        {
+            <MudText Typo="Typo.body2" Class="mud-text-secondary">Last calculated: @_lastCalculatedAt.Value.ToString("dd MMM yyyy, HH:mm")</MudText>
+        }
+    </MudStack>
+
+    @if (_loading)
+    {
+        <MudProgressCircular Indeterminate="true" Color="Color.Primary" />
+    }
+    else if (_entries.Count == 0)
+    {
+        <MudAlert Severity="Severity.Info">Shortlist is being calculated. Check back after 19:00.</MudAlert>
+    }
+    else
+    {
+        @for (var i = 0; i < _entries.Count; i++)
+        {
+            var rank = i + 1;
+            var entry = _entries[i];
+            <MudCard Class="mb-6" Style="background:#1a1d2e;">
+                <MudCardContent>
+                    <MudStack Row="true" Spacing="4" AlignItems="AlignItems.Start">
+                        <MudText Typo="Typo.h3" Style="font-weight:700; min-width:3.5rem;" Class="mud-text-secondary">#@rank</MudText>
+                        <MudStack Spacing="1" Class="flex-grow-1">
+                            <MudStack Row="true" Justify="Justify.SpaceBetween" AlignItems="AlignItems.Center">
+                                <MudStack Row="true" Spacing="3" AlignItems="AlignItems.Center">
+                                    <MudText Typo="Typo.h5" Style="font-weight:700;">@entry.Score.Ticker</MudText>
+                                    <MudText Typo="Typo.body1" Class="mud-text-secondary">@entry.Score.CompanyName</MudText>
+                                    @if (!string.IsNullOrWhiteSpace(entry.Score.Sector))
+                                    {
+                                        <MudChip T="string" Color="Color.Primary" Variant="Variant.Outlined" Size="Size.Small">@entry.Score.Sector</MudChip>
+                                    }
+                                </MudStack>
+                                <MudText Typo="Typo.h4" Style="font-weight:700;" Color="@GetScoreColor(entry.Score.Score)">@entry.Score.Score.ToString("0.0")</MudText>
+                            </MudStack>
+
+                            <MudStack Row="true" Spacing="2" Class="mt-2">
+                                <MudChip T="string" Variant="Variant.Filled" Size="Size.Small">@entry.Score.SignalCount signals</MudChip>
+                                <MudChip T="string" Variant="Variant.Filled" Size="Size.Small">@entry.Score.SignalDiversity types</MudChip>
+                                <MudChip T="string" Variant="Variant.Filled" Size="Size.Small" Color="@GetVelocityColor(entry.Score.VelocityLevel)">@GetVelocityLabel(entry.Score.VelocityLevel)</MudChip>
+                            </MudStack>
+
+                            @if (!string.IsNullOrWhiteSpace(entry.LatestRationale))
+                            {
+                                <MudText Typo="Typo.body2" Class="mt-3">@entry.LatestRationale</MudText>
+                            }
+
+                            <MudButton Variant="Variant.Text"
+                                       Color="Color.Primary"
+                                       Size="Size.Small"
+                                       Class="mt-2"
+                                       Style="align-self:flex-start;"
+                                       OnClick="() => ToggleExpand(entry.Score.Id)">
+                                @(IsExpanded(entry.Score.Id) ? "Hide signals" : "View all signals")
+                            </MudButton>
+
+                            @if (IsExpanded(entry.Score.Id))
+                            {
+                                <MudStack Spacing="1" Class="mt-2">
+                                    @if (entry.Signals.Count == 0)
+                                    {
+                                        <MudText Typo="Typo.body2" Class="mud-text-secondary">No signals found for the last 14 days.</MudText>
+                                    }
+                                    else
+                                    {
+                                        @foreach (var signal in entry.Signals)
+                                        {
+                                            <MudText Typo="Typo.body2">
+                                                <strong>[@signal.SignalType]</strong> @signal.Title — @signal.PublishedAt.ToString("dd MMM yyyy")
+                                            </MudText>
+                                        }
+                                    }
+                                </MudStack>
+                            }
+                        </MudStack>
+                    </MudStack>
+                </MudCardContent>
+            </MudCard>
+        }
+    }
+</MudContainer>
+
+@code {
+    private bool _loading = true;
+    private DateTime? _lastCalculatedAt;
+    private List<ShortlistEntry> _entries = [];
+    private readonly HashSet<int> _expandedIds = [];
+
+    protected override async Task OnInitializedAsync()
+    {
+        await using var dbContext = await DbContextFactory.CreateDbContextAsync();
+
+        var windowStart = DateTime.UtcNow.AddDays(-14);
+
+        var topScores = await dbContext.CumulativeScores
+            .OrderByDescending(s => s.Score)
+            .Take(5)
+            .ToListAsync();
+
+        _lastCalculatedAt = topScores.Count > 0 ? topScores.Max(s => s.LastCalculatedAt) : null;
+
+        var entries = new List<ShortlistEntry>();
+        foreach (var score in topScores)
+        {
+            var picks = await dbContext.CompanyPicks
+                .Where(p => p.Ticker == score.Ticker && p.CompanyName == score.CompanyName && p.PickedAt >= windowStart)
+                .OrderByDescending(p => p.PickedAt)
+                .ToListAsync();
+
+            var latestRationale = picks.FirstOrDefault()?.Rationale;
+
+            var runLogIds = picks
+                .Where(p => p.RunLogId.HasValue)
+                .Select(p => p.RunLogId!.Value)
+                .Distinct()
+                .ToList();
+
+            var signals = runLogIds.Count == 0
+                ? new List<Signal>()
+                : await dbContext.Signals
+                    .Where(s => s.RunLogId != null && runLogIds.Contains(s.RunLogId.Value))
+                    .OrderByDescending(s => s.PublishedAt)
+                    .ToListAsync();
+
+            entries.Add(new ShortlistEntry(score, latestRationale, signals));
+        }
+
+        _entries = entries;
+        _loading = false;
+    }
+
+    private bool IsExpanded(int scoreId) => _expandedIds.Contains(scoreId);
+
+    private void ToggleExpand(int scoreId)
+    {
+        if (!_expandedIds.Add(scoreId))
+        {
+            _expandedIds.Remove(scoreId);
+        }
+    }
+
+    private static Color GetScoreColor(decimal score) => score switch
+    {
+        >= 70 => Color.Success,
+        >= 40 => Color.Warning,
+        _ => Color.Error,
+    };
+
+    private static Color GetVelocityColor(VelocityLevel level) => level switch
+    {
+        VelocityLevel.High => Color.Error,
+        VelocityLevel.Medium => Color.Warning,
+        _ => Color.Default,
+    };
+
+    private static string GetVelocityLabel(VelocityLevel level) => level switch
+    {
+        VelocityLevel.High => "🔥 High",
+        VelocityLevel.Medium => "⚡ Medium",
+        _ => "· Low",
+    };
+
+    private sealed record ShortlistEntry(CumulativeScore Score, string? LatestRationale, List<Signal> Signals);
+}

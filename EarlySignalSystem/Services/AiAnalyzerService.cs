@@ -53,6 +53,16 @@ public class AiAnalyzerService : IAiAnalyzerService
                 continue;
             }
 
+            // Един RunLog на batch, за да могат SectorScores/CompanyPicks да се свържат обратно към
+            // сигналите, от които произлизат (виж CumulativeScoringService — Signal Diversity минава през RunLogId).
+            var runLog = new RunLog
+            {
+                StartedAt = DateTime.UtcNow,
+                Status = "Running"
+            };
+            _dbContext.RunLogs.Add(runLog);
+            await _dbContext.SaveChangesAsync(cancellationToken);
+
             var analyzedAt = DateTime.UtcNow;
 
             foreach (var sector in analysis.Sectors)
@@ -64,7 +74,8 @@ public class AiAnalyzerService : IAiAnalyzerService
                     Rationale = string.IsNullOrWhiteSpace(sector.Trend)
                         ? sector.Rationale
                         : $"[{sector.Trend}] {sector.Rationale}",
-                    ScoredAt = analyzedAt
+                    ScoredAt = analyzedAt,
+                    RunLogId = runLog.Id
                 });
             }
 
@@ -77,14 +88,20 @@ public class AiAnalyzerService : IAiAnalyzerService
                     Sector = company.Sector,
                     ConfidenceScore = company.Score,
                     Rationale = company.Rationale,
-                    PickedAt = analyzedAt
+                    PickedAt = analyzedAt,
+                    RunLogId = runLog.Id
                 });
             }
 
             foreach (var signal in batch)
             {
                 signal.Processed = true;
+                signal.RunLogId = runLog.Id;
             }
+
+            runLog.Status = "Completed";
+            runLog.SignalsCollected = batch.Length;
+            runLog.CompletedAt = DateTime.UtcNow;
 
             await _dbContext.SaveChangesAsync(cancellationToken);
             processedCount += batch.Length;

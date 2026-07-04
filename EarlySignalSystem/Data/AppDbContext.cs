@@ -13,6 +13,7 @@ public class AppDbContext : DbContext
     public DbSet<SectorScore> SectorScores => Set<SectorScore>();
     public DbSet<CompanyPick> CompanyPicks => Set<CompanyPick>();
     public DbSet<RunLog> RunLogs => Set<RunLog>();
+    public DbSet<CumulativeScore> CumulativeScores => Set<CumulativeScore>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -22,6 +23,10 @@ public class AppDbContext : DbContext
 
         modelBuilder.Entity<CompanyPick>()
             .Property(c => c.ConfidenceScore)
+            .HasPrecision(5, 2);
+
+        modelBuilder.Entity<CumulativeScore>()
+            .Property(c => c.Score)
             .HasPrecision(5, 2);
 
         modelBuilder.Entity<Signal>()
