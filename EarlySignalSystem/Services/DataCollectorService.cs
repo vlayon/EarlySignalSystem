@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -346,7 +347,7 @@ public class DataCollectorService : IDataCollectorService
 
     private const string TedSource = "TED";
     private const string GovernmentContractSignalType = "GovernmentContract";
-    private const string TedFeedUrl = "https://ted.europa.eu/TED/misc/rssCurrentNotices.do";
+    private const string TedApiUrl = "https://ted.europa.eu/api/v3.0/notices/search";
     private const decimal MinContractValueEur = 1_000_000m;
 
     public async Task<int> CollectTedSignalsAsync(CancellationToken cancellationToken = default)
@@ -371,7 +372,8 @@ public class DataCollectorService : IDataCollectorService
 
             foreach (var notice in notices)
             {
-                if (existingLinks.Contains(notice.Link) || notice.ValueEur is null || notice.ValueEur < MinContractValueEur)
+                var sourceUrl = $"https://ted.europa.eu/en/notice/{notice.NoticeId}";
+                if (existingLinks.Contains(sourceUrl) || notice.ValueEur is null || notice.ValueEur < MinContractValueEur)
                 {
                     continue;
                 }
@@ -380,16 +382,16 @@ public class DataCollectorService : IDataCollectorService
                 {
                     Source = TedSource,
                     SignalType = GovernmentContractSignalType,
-                    SourceUrl = notice.Link,
+                    SourceUrl = sourceUrl,
                     Title = notice.Title,
-                    RawContent = $"Value: {notice.ValueEur:N0} EUR; Buyer: {notice.Buyer ?? "n/a"}; Winner: {notice.Winner ?? "n/a"}",
+                    RawContent = $"Value: {notice.ValueEur:N0} EUR; Country: {notice.Country ?? "n/a"}",
                     PublishedAt = notice.PublishedAt,
                     CollectedAt = DateTime.UtcNow,
                     Processed = false,
                     RunLogId = runLog.Id
                 });
 
-                existingLinks.Add(notice.Link);
+                existingLinks.Add(sourceUrl);
                 collected++;
             }
 
@@ -413,64 +415,83 @@ public class DataCollectorService : IDataCollectorService
 
     private async Task<List<TedNotice>> FetchTedNoticesAsync(CancellationToken cancellationToken)
     {
-        await using var stream = await _httpClient.GetStreamAsync(TedFeedUrl, cancellationToken);
-        var document = await XDocument.LoadAsync(stream, LoadOptions.None, cancellationToken);
+        var yesterday = DateTime.UtcNow.AddDays(-1).ToString("yyyyMMdd", CultureInfo.InvariantCulture);
+        var requestBody = new
+        {
+            query = $"ND=[0-9]* AND PD>={yesterday}",
+            fields = new[] { "ND", "TI", "AC", "CY", "DT", "TV" },
+            page = 1,
+            pageSize = 100,
+            paginationMode = "PAGE"
+        };
+
+        using var response = await _httpClient.PostAsJsonAsync(TedApiUrl, requestBody, cancellationToken);
+        response.EnsureSuccessStatusCode();
+
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        using var payload = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
 
         var notices = new List<TedNotice>();
-        foreach (var item in document.Descendants("item"))
+        if (!payload.RootElement.TryGetProperty("notices", out var noticesElement) || noticesElement.ValueKind != JsonValueKind.Array)
         {
-            var title = item.Element("title")?.Value.Trim() ?? string.Empty;
-            var link = item.Element("link")?.Value.Trim() ?? string.Empty;
-            if (string.IsNullOrWhiteSpace(title) || string.IsNullOrWhiteSpace(link))
+            return notices;
+        }
+
+        foreach (var notice in noticesElement.EnumerateArray())
+        {
+            var noticeId = GetTedFieldValue(notice, "ND");
+            if (string.IsNullOrWhiteSpace(noticeId))
             {
                 continue;
             }
 
-            var description = item.Element("description")?.Value ?? string.Empty;
-            var pubDateRaw = item.Element("pubDate")?.Value;
-            var publishedAt = DateTimeOffset.TryParse(pubDateRaw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsed)
-                ? parsed.UtcDateTime
+            var title = GetTedFieldValue(notice, "TI") ?? string.Empty;
+            var country = GetTedFieldValue(notice, "CY");
+            var publishedAt = DateTime.TryParseExact(GetTedFieldValue(notice, "DT"), "yyyyMMdd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsedDate)
+                ? parsedDate
                 : DateTime.UtcNow;
+            var valueEur = ParseTedValue(GetTedFieldValue(notice, "TV"));
 
-            notices.Add(new TedNotice(
-                title,
-                link,
-                publishedAt,
-                ExtractTedValueEur(description),
-                ExtractTedField(description, "Contracting authority", "Buyer"),
-                ExtractTedField(description, "Contract award to", "Winner")));
+            notices.Add(new TedNotice(noticeId, title, valueEur, country, publishedAt));
         }
 
         return notices;
     }
 
-    private static decimal? ExtractTedValueEur(string description)
+    // Notice полетата в TED search API могат да са скаларни или масиви (multilingual/multi-value) —
+    // според задачата TI[0] е заглавието, затова четем първия елемент, ако полето е масив.
+    private static string? GetTedFieldValue(JsonElement notice, string propertyName)
     {
-        var match = Regex.Match(description, @"(?<amount>[\d.,]{4,})\s*EUR", RegexOptions.IgnoreCase);
-        if (!match.Success)
+        if (!notice.TryGetProperty(propertyName, out var value))
         {
             return null;
         }
 
-        var normalized = match.Groups["amount"].Value.Replace(".", string.Empty).Replace(",", string.Empty);
+        if (value.ValueKind == JsonValueKind.Array)
+        {
+            value = value.EnumerateArray().FirstOrDefault();
+        }
+
+        return value.ValueKind switch
+        {
+            JsonValueKind.String => value.GetString(),
+            JsonValueKind.Number => value.GetRawText(),
+            _ => null
+        };
+    }
+
+    private static decimal? ParseTedValue(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return null;
+        }
+
+        var normalized = Regex.Replace(raw, @"[^\d.,]", string.Empty).Replace(",", string.Empty);
         return decimal.TryParse(normalized, NumberStyles.Any, CultureInfo.InvariantCulture, out var value) ? value : null;
     }
 
-    private static string? ExtractTedField(string description, params string[] labels)
-    {
-        foreach (var label in labels)
-        {
-            var match = Regex.Match(description, $@"{Regex.Escape(label)}\s*:\s*(?<value>[^<\n]+)", RegexOptions.IgnoreCase);
-            if (match.Success)
-            {
-                return match.Groups["value"].Value.Trim();
-            }
-        }
-
-        return null;
-    }
-
-    private sealed record TedNotice(string Title, string Link, DateTime PublishedAt, decimal? ValueEur, string? Buyer, string? Winner);
+    private sealed record TedNotice(string NoticeId, string Title, decimal? ValueEur, string? Country, DateTime PublishedAt);
 
     private const string OecdSource = "OECD";
     private const string BudgetChangeSignalType = "BudgetChange";
