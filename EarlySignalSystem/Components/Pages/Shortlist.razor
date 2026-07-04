@@ -56,9 +56,9 @@
                                 </MudStack>
                             </MudStack>
 
-                            <MudStack Row="true" Spacing="2" Class="mt-2">
-                                <MudChip T="string" Variant="Variant.Filled" Size="Size.Small">@entry.Score.SignalCount signals</MudChip>
-                                <MudChip T="string" Variant="Variant.Filled" Size="Size.Small">@entry.Score.SignalDiversity types</MudChip>
+                            <MudStack Row="true" Spacing="1" Class="mt-2">
+                                <MudChip T="string" Variant="Variant.Filled" Size="Size.Small" Color="Color.Default">@entry.Score.SignalCount signals</MudChip>
+                                <MudChip T="string" Variant="Variant.Filled" Size="Size.Small" Color="@GetDiversityColor(entry.Score.SignalDiversity)">@GetDiversityLabel(entry.Score.SignalDiversity)</MudChip>
                                 <MudChip T="string" Variant="Variant.Filled" Size="Size.Small" Color="@GetVelocityColor(entry.Score.VelocityLevel)">@GetVelocityLabel(entry.Score.VelocityLevel)</MudChip>
                             </MudStack>
 
@@ -181,10 +181,20 @@
 
     private static string GetVelocityLabel(VelocityLevel level) => level switch
     {
-        VelocityLevel.High => "🔥 High",
-        VelocityLevel.Medium => "⚡ Medium",
-        _ => "· Low",
+        VelocityLevel.High => "🔥 High velocity",
+        VelocityLevel.Medium => "⚡ Medium velocity",
+        _ => "· Low velocity",
     };
+
+    private static Color GetDiversityColor(int diversity) => diversity switch
+    {
+        >= 3 => Color.Success,
+        2 => Color.Warning,
+        _ => Color.Default,
+    };
+
+    private static string GetDiversityLabel(int diversity) =>
+        diversity == 1 ? "● 1 source type" : $"● {diversity} source types";
 
     private static Color GetSentimentColor(string sentiment) => sentiment switch
     {
