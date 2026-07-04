@@ -546,6 +546,14 @@ public class DataCollectorService : IDataCollectorService
         var collected = 0;
         try
         {
+            // Временно деактивирано: годишните OECD government-deficit данни се оказаха неподходящи за
+            // real-time signal detection (year-over-year сравнение на исторически годишни стойности създава
+            // шум, не действителни "нови" сигнали). Fetch/parse логиката отдолу (FetchOecdBudgetChangesAsync,
+            // ParseOecdSdmxJson, BuildOecdSeriesLabel) е запазена непокътната за бъдещо re-enable с по-подходящ
+            // dataset. Хвърляме веднага, за да падне в catch-а по-долу без да се пипа останалата логика.
+            throw new InvalidOperationException("OECD collector temporarily disabled - historical data not suitable for signal detection");
+#pragma warning disable CS0162 // Unreachable code detected — запазено непокътнато за бъдещо re-enable, виж коментара по-горе.
+
             var changes = await FetchOecdBudgetChangesAsync(cancellationToken);
 
             var existingLinks = await _dbContext.Signals
@@ -584,15 +592,16 @@ public class DataCollectorService : IDataCollectorService
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to collect OECD signals");
+            _logger.LogWarning(ex, "OECD collector disabled");
             runLog.Status = "Failed";
             runLog.ErrorMessage = ex.Message;
             runLog.CompletedAt = DateTime.UtcNow;
             await _dbContext.SaveChangesAsync(cancellationToken);
-            throw;
+            return 0;
         }
 
         return collected;
+#pragma warning restore CS0162
     }
 
     private async Task<List<OecdBudgetChange>> FetchOecdBudgetChangesAsync(CancellationToken cancellationToken)

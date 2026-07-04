@@ -12,7 +12,10 @@ public class AiAnalyzerService : IAiAnalyzerService
 {
     private const string ApiUrl = "https://api.anthropic.com/v1/messages";
     private const string Model = "claude-haiku-4-5";
-    private const int MaxTokens = 1000;
+    // По-строгият prompt изисква 2-изреченски structured rationale за всяка компания — 1000 токена бяха
+    // прекалено малко и Claude режеше отговора си по средата на JSON-а (truncated -> невалиден JSON, batch-ът
+    // оставаше Processed=false завинаги, потвърдено на живо).
+    private const int MaxTokens = 2048;
     private const int BatchSize = 15;
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
@@ -146,7 +149,11 @@ public class AiAnalyzerService : IAiAnalyzerService
     private static string BuildPrompt(Signal[] batch)
     {
         var sb = new StringBuilder();
-        sb.AppendLine("You are an investment analyst. Analyze the following signals and respond with ONLY valid JSON matching this exact structure, no other text:");
+        sb.AppendLine("Analyze these regulatory/legislative signals and identify companies with DIRECT and SPECIFIC business impact.");
+        sb.AppendLine("Only include a company if: (1) the regulation directly targets its industry/product category, (2) the company has a concrete competitive advantage from this specific regulation, (3) you can explain in 2 sentences exactly HOW the regulation affects THIS company's revenue or market position.");
+        sb.AppendLine("DO NOT include companies based on: general sector exposure, country of domicile, or indirect/speculative connections.");
+        sb.AppendLine("For each company, the rationale MUST follow this format: \"[Specific regulation/signal] directly affects [company] because [specific business reason]. Unlike competitors, [company] is better positioned because [concrete differentiator].\"");
+        sb.AppendLine("Return strict JSON only, no preamble, matching this exact structure:");
         sb.AppendLine("{ \"sectors\": [ { \"sector\": \"string\", \"score\": 0-100, \"trend\": \"Rising|Stable|Falling\", \"rationale\": \"string\" } ], \"companies\": [ { \"ticker\": \"string\", \"companyName\": \"string\", \"sector\": \"string\", \"score\": 0-100, \"rationale\": \"string\" } ] }");
         sb.AppendLine();
         sb.AppendLine("Signals:");

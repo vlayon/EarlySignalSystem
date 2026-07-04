@@ -69,10 +69,13 @@ RecurringJob.AddOrUpdate<IDataCollectorService>(
     service => service.CollectTedSignalsAsync(CancellationToken.None),
     "15 18 * * *");
 
-RecurringJob.AddOrUpdate<IDataCollectorService>(
-    "oecd-collector",
-    service => service.CollectOecdSignalsAsync(CancellationToken.None),
-    "20 18 * * *");
+// oecd-collector е временно деактивиран — историческите (годишни) OECD данни не са подходящи
+// за real-time signal detection. Виж CollectOecdSignalsAsync в DataCollectorService.cs.
+// RecurringJob.AddOrUpdate<IDataCollectorService>(
+//     "oecd-collector",
+//     service => service.CollectOecdSignalsAsync(CancellationToken.None),
+//     "20 18 * * *");
+RecurringJob.RemoveIfExists("oecd-collector");
 
 RecurringJob.AddOrUpdate<IDataCollectorService>(
     "esma-collector",

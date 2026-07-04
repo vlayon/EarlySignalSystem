@@ -14,6 +14,7 @@ public class CumulativeScoringService : ICumulativeScoringService
     private const decimal MediumVelocityBonus = 5m;
     private const int HighVelocityThreshold = 3;
     private const int MediumVelocityThreshold = 1;
+    private const int MinSignalCountForInclusion = 2;
 
     private readonly AppDbContext _dbContext;
     private readonly ILogger<CumulativeScoringService> _logger;
@@ -39,8 +40,15 @@ public class CumulativeScoringService : ICumulativeScoringService
         foreach (var group in picks.GroupBy(p => new { p.CompanyName, p.Ticker }))
         {
             var companyPicks = group.ToList();
-            var baseScore = companyPicks.Average(p => p.ConfidenceScore);
             var signalCount = companyPicks.Count;
+
+            // Компания с 1 сигнал е noise, не достатъчно потвърден сигнал — изключваме я от shortlist-а.
+            if (signalCount < MinSignalCountForInclusion)
+            {
+                continue;
+            }
+
+            var baseScore = companyPicks.Average(p => p.ConfidenceScore);
             var velocity = companyPicks.Count(p => p.PickedAt >= velocityStart);
 
             var runLogIds = companyPicks
