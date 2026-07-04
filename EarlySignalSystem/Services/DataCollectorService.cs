@@ -727,12 +727,16 @@ public class DataCollectorService : IDataCollectorService
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to collect ESMA signals");
+            // ESMA премести net-short-position данните към CAPTCHA-защитен registers портал —
+            // автоматичен достъп вече не е възможен без официален API ключ. Логваме и продължаваме
+            // (не хвърляме), за да не блокираме останалите collector-и/Hangfire retry-и.
+            // Fetch/parse логиката по-долу е запазена за когато се появи алтернативен endpoint.
+            _logger.LogWarning(ex, "ESMA endpoint unavailable");
             runLog.Status = "Failed";
-            runLog.ErrorMessage = ex.Message;
+            runLog.ErrorMessage = "ESMA endpoint unavailable";
             runLog.CompletedAt = DateTime.UtcNow;
             await _dbContext.SaveChangesAsync(cancellationToken);
-            throw;
+            return 0;
         }
 
         return collected;
