@@ -84,16 +84,37 @@ public class AiAnalyzerService : IAiAnalyzerService
 
             foreach (var company in analysis.Companies)
             {
-                _dbContext.CompanyPicks.Add(new CompanyPick
+                var companyPick = new CompanyPick
                 {
                     Ticker = company.Ticker,
                     CompanyName = company.CompanyName,
                     Sector = company.Sector,
                     ConfidenceScore = company.Score,
                     Rationale = company.Rationale,
+                    Sentiment = NormalizeSentiment(company.Sentiment),
                     PickedAt = analyzedAt,
                     RunLogId = runLog.Id
-                });
+                };
+
+                // signalCelexIds сочи към signal.Id-тата (посочени в prompt-а като [ID:x]) на сигналите от
+                // ТОЗИ batch, от които AI-ят е извел pick-а — свързваме ги през CompanyPickSignals, за да може
+                // Shortlist.razor да покаже точно тези сигнали, не целия batch.
+                foreach (var signalRef in company.SignalCelexIds ?? [])
+                {
+                    var idText = signalRef.Replace("CELEX:", string.Empty, StringComparison.OrdinalIgnoreCase).Trim();
+                    if (!int.TryParse(idText, out var signalId))
+                    {
+                        continue;
+                    }
+
+                    var matchedSignal = batch.FirstOrDefault(s => s.Id == signalId);
+                    if (matchedSignal is not null)
+                    {
+                        companyPick.CompanyPickSignals.Add(new CompanyPickSignal { Signal = matchedSignal });
+                    }
+                }
+
+                _dbContext.CompanyPicks.Add(companyPick);
             }
 
             foreach (var signal in batch)
@@ -153,13 +174,15 @@ public class AiAnalyzerService : IAiAnalyzerService
         sb.AppendLine("Only include a company if: (1) the regulation directly targets its industry/product category, (2) the company has a concrete competitive advantage from this specific regulation, (3) you can explain in 2 sentences exactly HOW the regulation affects THIS company's revenue or market position.");
         sb.AppendLine("DO NOT include companies based on: general sector exposure, country of domicile, or indirect/speculative connections.");
         sb.AppendLine("For each company, the rationale MUST follow this format: \"[Specific regulation/signal] directly affects [company] because [specific business reason]. Unlike competitors, [company] is better positioned because [concrete differentiator].\"");
+        sb.AppendLine("Each signal below is prefixed with its reference ID, e.g. \"[ID:123]\". For each company, \"signalCelexIds\" MUST list the exact reference ID(s) (as strings) of the signal(s) below that this pick is based on.");
+        sb.AppendLine("Each company MUST also include a \"sentiment\" field, one of exactly: \"Bullish\" (the company is expected to benefit from the signal), \"Bearish\" (expected to lose or be threatened by it), or \"Neutral\" (affected, but the direction is unclear). This field is required, never omit it.");
         sb.AppendLine("Return strict JSON only, no preamble, matching this exact structure:");
-        sb.AppendLine("{ \"sectors\": [ { \"sector\": \"string\", \"score\": 0-100, \"trend\": \"Rising|Stable|Falling\", \"rationale\": \"string\" } ], \"companies\": [ { \"ticker\": \"string\", \"companyName\": \"string\", \"sector\": \"string\", \"score\": 0-100, \"rationale\": \"string\" } ] }");
+        sb.AppendLine("{ \"sectors\": [ { \"sector\": \"string\", \"score\": 0-100, \"trend\": \"Rising|Stable|Falling\", \"rationale\": \"string\" } ], \"companies\": [ { \"ticker\": \"string\", \"companyName\": \"string\", \"sector\": \"string\", \"score\": 0-100, \"rationale\": \"string\", \"sentiment\": \"Bullish|Bearish|Neutral\", \"signalCelexIds\": [\"string\"] } ] }");
         sb.AppendLine();
         sb.AppendLine("Signals:");
         foreach (var signal in batch)
         {
-            sb.AppendLine($"- [{signal.Source}] {signal.Title} (published {signal.PublishedAt:yyyy-MM-dd})");
+            sb.AppendLine($"- [ID:{signal.Id}] [{signal.Source}] {signal.Title} (published {signal.PublishedAt:yyyy-MM-dd})");
             if (!string.IsNullOrWhiteSpace(signal.RawContent))
             {
                 sb.AppendLine($"  {signal.RawContent}");
@@ -168,6 +191,14 @@ public class AiAnalyzerService : IAiAnalyzerService
 
         return sb.ToString();
     }
+
+    private static string? NormalizeSentiment(string? sentiment) => sentiment?.Trim() switch
+    {
+        "Bullish" => "Bullish",
+        "Bearish" => "Bearish",
+        "Neutral" => "Neutral",
+        _ => "Neutral"
+    };
 
     private ClaudeAnalysisResult? ParseAnalysis(string text)
     {
@@ -227,5 +258,7 @@ public class AiAnalyzerService : IAiAnalyzerService
         public string Sector { get; set; } = string.Empty;
         public decimal Score { get; set; }
         public string? Rationale { get; set; }
+        public string? Sentiment { get; set; }
+        public List<string>? SignalCelexIds { get; set; }
     }
 }

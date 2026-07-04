@@ -14,6 +14,7 @@ public class AppDbContext : DbContext
     public DbSet<CompanyPick> CompanyPicks => Set<CompanyPick>();
     public DbSet<RunLog> RunLogs => Set<RunLog>();
     public DbSet<CumulativeScore> CumulativeScores => Set<CumulativeScore>();
+    public DbSet<CompanyPickSignal> CompanyPickSignals => Set<CompanyPickSignal>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -46,5 +47,17 @@ public class AppDbContext : DbContext
             .WithMany(r => r.CompanyPicks)
             .HasForeignKey(c => c.RunLogId)
             .OnDelete(DeleteBehavior.SetNull);
+
+        modelBuilder.Entity<CompanyPickSignal>()
+            .HasOne(cps => cps.CompanyPick)
+            .WithMany(c => c.CompanyPickSignals)
+            .HasForeignKey(cps => cps.CompanyPickId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<CompanyPickSignal>()
+            .HasOne(cps => cps.Signal)
+            .WithMany()
+            .HasForeignKey(cps => cps.SignalId)
+            .OnDelete(DeleteBehavior.Cascade);
     }
 }
