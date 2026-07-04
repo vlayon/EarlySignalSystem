@@ -526,8 +526,11 @@ public class DataCollectorService : IDataCollectorService
 
     private const string OecdSource = "OECD";
     private const string BudgetChangeSignalType = "BudgetChange";
-    private const string OecdApiUrl = "https://sdmx.oecd.org/public/rest/data/OECD.GOV.GFC,DSD_GFSQ@DF_GFSQ/";
-    private const string OecdFallbackApiUrl = "https://stats.oecd.org/SDMX-JSON/data/GOV_10Q_GGNFA/";
+    // OECD.SDD.NAD, "Annual government deficit/surplus, revenue, expenditure and main aggregates IDC" (DF_TABLE12_IDC),
+    // filtered към FREQ=A, REF_SECTOR=S13 (General government), ACCOUNTING_ENTRY=B (Balancing item), STO=B9
+    // (Net lending/net borrowing) — истинско, проверено на живо government-deficit измерение. Няма quarterly
+    // еквивалент с sector breakdown в OECD SDMX (проверено): quarterly national accounts покриват само total economy.
+    private const string OecdApiUrl = "https://sdmx.oecd.org/public/rest/data/OECD.SDD.NAD,DSD_NASEC10_IDC@DF_TABLE12_IDC,1.0/A....S13...B.B9..........";
     private const decimal SignificantChangePercent = 5m;
 
     public async Task<int> CollectOecdSignalsAsync(CancellationToken cancellationToken = default)
@@ -562,7 +565,7 @@ public class DataCollectorService : IDataCollectorService
                     Source = OecdSource,
                     SignalType = BudgetChangeSignalType,
                     SourceUrl = change.SourceUrl,
-                    Title = $"{change.SeriesLabel}: {change.PercentChange:+0.0;-0.0}% quarter-over-quarter",
+                    Title = $"{change.SeriesLabel} general government balance: {change.PercentChange:+0.0;-0.0}% year-over-year",
                     RawContent = $"Previous: {change.PreviousValue}; Latest: {change.LatestValue}; Period: {change.Period}",
                     PublishedAt = DateTime.UtcNow,
                     CollectedAt = DateTime.UtcNow,
@@ -594,21 +597,7 @@ public class DataCollectorService : IDataCollectorService
 
     private async Task<List<OecdBudgetChange>> FetchOecdBudgetChangesAsync(CancellationToken cancellationToken)
     {
-        try
-        {
-            return await FetchOecdSdmxJsonAsync(OecdApiUrl, cancellationToken);
-        }
-        catch (HttpRequestException ex)
-        {
-            // Основният SDMX 3.0 endpoint понякога връща грешка за конкретни dataset ключове — при провал пробваме legacy stats.oecd.org формата.
-            _logger.LogWarning(ex, "OECD primary endpoint failed, falling back to legacy SDMX-JSON endpoint");
-            return await FetchOecdSdmxJsonAsync(OecdFallbackApiUrl, cancellationToken);
-        }
-    }
-
-    private async Task<List<OecdBudgetChange>> FetchOecdSdmxJsonAsync(string url, CancellationToken cancellationToken)
-    {
-        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        using var request = new HttpRequestMessage(HttpMethod.Get, OecdApiUrl);
         request.Headers.Accept.ParseAdd("application/vnd.sdmx.data+json");
 
         using var response = await _httpClient.SendAsync(request, cancellationToken);
@@ -617,21 +606,23 @@ public class DataCollectorService : IDataCollectorService
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
         using var payload = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
 
-        return ParseOecdSdmxJson(payload, url);
+        return ParseOecdSdmxJson(payload, OecdApiUrl);
     }
 
     private static List<OecdBudgetChange> ParseOecdSdmxJson(JsonDocument payload, string sourceUrl)
     {
         var results = new List<OecdBudgetChange>();
 
-        var root = payload.RootElement;
+        // sdmx.oecd.org връща SDMX-JSON 2.0.0: реалният payload е под "data" (dataSets/structures), не directly на root.
+        var root = payload.RootElement.GetProperty("data");
         var dataSets = root.GetProperty("dataSets");
         if (dataSets.GetArrayLength() == 0)
         {
             return results;
         }
 
-        var dimensions = root.GetProperty("structure").GetProperty("dimensions");
+        // "structures" е масив (не единичен "structure" обект както в по-старата версия на схемата).
+        var dimensions = root.GetProperty("structures")[0].GetProperty("dimensions");
         var seriesDimensions = dimensions.GetProperty("series");
         var observationPeriods = dimensions.GetProperty("observation")[0].GetProperty("values")
             .EnumerateArray()
@@ -641,6 +632,7 @@ public class DataCollectorService : IDataCollectorService
         foreach (var series in dataSets[0].GetProperty("series").EnumerateObject())
         {
             var observations = series.Value.GetProperty("observations").EnumerateObject()
+                .Where(o => o.Value[0].ValueKind == JsonValueKind.Number)
                 .Select(o => (Index: int.Parse(o.Name, CultureInfo.InvariantCulture), Value: o.Value[0].GetDecimal()))
                 .OrderBy(o => o.Index)
                 .ToList();
@@ -672,32 +664,36 @@ public class DataCollectorService : IDataCollectorService
         return results;
     }
 
+    // Заявката е закачена за един конкретен индикатор (general government net lending/borrowing) — единствената
+    // променлива координата по série е REF_AREA, затова label-ът е просто името на държавата, не dump на
+    // всичките 19 dimension-а от DSD (повечето от които "Not applicable" за тази заявка).
     private static string BuildOecdSeriesLabel(string seriesKey, JsonElement seriesDimensions)
     {
         var indices = seriesKey.Split(':');
-        var labels = new List<string>();
 
-        for (var i = 0; i < indices.Length && i < seriesDimensions.GetArrayLength(); i++)
+        for (var i = 0; i < seriesDimensions.GetArrayLength(); i++)
         {
-            if (!int.TryParse(indices[i], out var valueIndex))
+            var dimension = seriesDimensions[i];
+            if (dimension.GetProperty("id").GetString() != "REF_AREA")
             {
                 continue;
             }
 
-            var values = seriesDimensions[i].GetProperty("values");
-            if (valueIndex < 0 || valueIndex >= values.GetArrayLength())
+            if (i >= indices.Length || !int.TryParse(indices[i], out var valueIndex))
             {
-                continue;
+                break;
             }
 
-            var name = values[valueIndex].GetProperty("name").GetString();
-            if (!string.IsNullOrWhiteSpace(name))
+            var values = dimension.GetProperty("values");
+            if (valueIndex >= 0 && valueIndex < values.GetArrayLength())
             {
-                labels.Add(name);
+                return values[valueIndex].GetProperty("name").GetString() ?? seriesKey;
             }
+
+            break;
         }
 
-        return labels.Count > 0 ? string.Join(" - ", labels) : seriesKey;
+        return seriesKey;
     }
 
     private sealed record OecdBudgetChange(string SeriesLabel, decimal PreviousValue, decimal LatestValue, decimal PercentChange, string Period, string SourceUrl);
