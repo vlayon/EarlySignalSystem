@@ -55,18 +55,24 @@ app.MapRazorComponents<App>()
 
 app.MapHangfireDashboard();
 
-app.MapPost("/api/scan-now", async (
-    IDataCollectorService collector,
-    IAiAnalyzerService analyzer,
-    ICumulativeScoringService scorer,
-    CancellationToken cancellationToken) =>
+app.MapPost("/api/scan-now", (IBackgroundJobClient backgroundJobs) =>
 {
-    await collector.CollectEurLexSignalsAsync(cancellationToken);
-    await collector.CollectSecEdgarSignalsAsync(cancellationToken);
-    await collector.CollectTedSignalsAsync(cancellationToken);
-    await collector.CollectEsmaSignalsAsync(cancellationToken);
-    await analyzer.AnalyzeSignalsAsync(cancellationToken);
-    await scorer.CalculateScoresAsync(cancellationToken);
+    // Hangfire OSS has no fan-in/batch continuation (that needs Hangfire Pro), so the collectors
+    // are chained one after another rather than truly in parallel — this still guarantees AI
+    // Analyzer runs exactly once, only after every collector has finished, and Cumulative Scorer
+    // runs exactly once, only after AI Analyzer finishes.
+    var eurLexJobId = backgroundJobs.Enqueue<IDataCollectorService>(
+        s => s.CollectEurLexSignalsAsync(CancellationToken.None));
+    var secEdgarJobId = backgroundJobs.ContinueJobWith<IDataCollectorService>(
+        eurLexJobId, s => s.CollectSecEdgarSignalsAsync(CancellationToken.None));
+    var tedJobId = backgroundJobs.ContinueJobWith<IDataCollectorService>(
+        secEdgarJobId, s => s.CollectTedSignalsAsync(CancellationToken.None));
+    var esmaJobId = backgroundJobs.ContinueJobWith<IDataCollectorService>(
+        tedJobId, s => s.CollectEsmaSignalsAsync(CancellationToken.None));
+    var analyzerJobId = backgroundJobs.ContinueJobWith<IAiAnalyzerService>(
+        esmaJobId, s => s.AnalyzeSignalsAsync(CancellationToken.None));
+    backgroundJobs.ContinueJobWith<ICumulativeScoringService>(
+        analyzerJobId, s => s.CalculateScoresAsync(CancellationToken.None));
 
     RecurringJobScheduler.SkipTodayAndRescheduleForTomorrow();
 
