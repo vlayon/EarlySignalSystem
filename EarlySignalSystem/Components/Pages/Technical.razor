@@ -139,7 +139,7 @@
         var today = DateTime.UtcNow.Date;
 
         var latestRunLogs = new Dictionary<string, RunLog?>();
-        foreach (var jobName in new[] { "EUR-Lex", "SEC-EDGAR", "TED", "AI-Analyzer", "Cumulative-Scorer" })
+        foreach (var jobName in new[] { "EUR-Lex", "SEC-EDGAR", "TED", "ESMA", "AI-Analyzer", "Cumulative-Scorer" })
         {
             latestRunLogs[jobName] = await dbContext.RunLogs
                 .Where(r => r.JobName == jobName)
@@ -153,7 +153,7 @@
             new CanalCard("SEC EDGAR Form 4", "Signals collected", latestRunLogs["SEC-EDGAR"], false),
             new CanalCard("TED", "Signals collected", latestRunLogs["TED"], false),
             new CanalCard("OECD", "Signals collected", null, true),
-            new CanalCard("ESMA", "Signals collected", null, true),
+            new CanalCard("ESMA", "Signals collected", latestRunLogs["ESMA"], false),
             new CanalCard("AI Analyzer", "Signals analyzed", latestRunLogs["AI-Analyzer"], false),
             new CanalCard("Cumulative Scorer", "Companies scored", latestRunLogs["Cumulative-Scorer"], false),
         ];
@@ -195,7 +195,7 @@
         var windowStart = today.AddDays(-29);
 
         var runLogs = await dbContext.RunLogs
-            .Where(r => r.StartedAt >= windowStart)
+            .Where(r => r.StartedAt >= windowStart && r.JobName != null)
             .ToListAsync();
 
         var picks = await dbContext.CompanyPicks
