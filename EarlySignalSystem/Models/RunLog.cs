@@ -3,6 +3,7 @@ namespace EarlySignalSystem.Models;
 public class RunLog
 {
     public int Id { get; set; }
+    public string? JobName { get; set; }
     public DateTime StartedAt { get; set; }
     public DateTime? CompletedAt { get; set; }
     public string Status { get; set; } = "Running";

@@ -21,6 +21,7 @@ builder.Services.AddDbContextFactory<AppDbContext>(options =>
 builder.Services.AddScoped<AppDbContext>(sp =>
     sp.GetRequiredService<IDbContextFactory<AppDbContext>>().CreateDbContext());
 
+builder.Services.AddHttpClient();
 builder.Services.AddHttpClient<IDataCollectorService, DataCollectorService>();
 builder.Services.AddHttpClient<IAiAnalyzerService, AiAnalyzerService>();
 builder.Services.AddScoped<ICumulativeScoringService, CumulativeScoringService>();
@@ -54,42 +55,24 @@ app.MapRazorComponents<App>()
 
 app.MapHangfireDashboard();
 
-RecurringJob.AddOrUpdate<IDataCollectorService>(
-    "eur-lex-data-collector",
-    service => service.CollectEurLexSignalsAsync(CancellationToken.None),
-    "0 18 * * *");
+app.MapPost("/api/scan-now", async (
+    IDataCollectorService collector,
+    IAiAnalyzerService analyzer,
+    ICumulativeScoringService scorer,
+    CancellationToken cancellationToken) =>
+{
+    await collector.CollectEurLexSignalsAsync(cancellationToken);
+    await collector.CollectSecEdgarSignalsAsync(cancellationToken);
+    await collector.CollectTedSignalsAsync(cancellationToken);
+    await collector.CollectEsmaSignalsAsync(cancellationToken);
+    await analyzer.AnalyzeSignalsAsync(cancellationToken);
+    await scorer.CalculateScoresAsync(cancellationToken);
 
-RecurringJob.AddOrUpdate<IDataCollectorService>(
-    "sec-edgar-collector",
-    service => service.CollectSecEdgarSignalsAsync(CancellationToken.None),
-    "10 18 * * *");
+    RecurringJobScheduler.SkipTodayAndRescheduleForTomorrow();
 
-RecurringJob.AddOrUpdate<IDataCollectorService>(
-    "ted-collector",
-    service => service.CollectTedSignalsAsync(CancellationToken.None),
-    "15 18 * * *");
+    return Results.Ok();
+});
 
-// oecd-collector е временно деактивиран — историческите (годишни) OECD данни не са подходящи
-// за real-time signal detection. Виж CollectOecdSignalsAsync в DataCollectorService.cs.
-// RecurringJob.AddOrUpdate<IDataCollectorService>(
-//     "oecd-collector",
-//     service => service.CollectOecdSignalsAsync(CancellationToken.None),
-//     "20 18 * * *");
-RecurringJob.RemoveIfExists("oecd-collector");
-
-RecurringJob.AddOrUpdate<IDataCollectorService>(
-    "esma-collector",
-    service => service.CollectEsmaSignalsAsync(CancellationToken.None),
-    "25 18 * * *");
-
-RecurringJob.AddOrUpdate<IAiAnalyzerService>(
-    "ai-signal-analyzer",
-    service => service.AnalyzeSignalsAsync(CancellationToken.None),
-    "30 18 * * *");
-
-RecurringJob.AddOrUpdate<ICumulativeScoringService>(
-    "cumulative-scorer",
-    service => service.CalculateScoresAsync(CancellationToken.None),
-    "0 19 * * *");
+RecurringJobScheduler.RegisterDailyJobs();
 
 app.Run();

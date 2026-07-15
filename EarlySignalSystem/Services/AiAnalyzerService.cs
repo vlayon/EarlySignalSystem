@@ -17,6 +17,7 @@ public class AiAnalyzerService : IAiAnalyzerService
     // оставаше Processed=false завинаги, потвърдено на живо).
     private const int MaxTokens = 2048;
     private const int BatchSize = 15;
+    private const string JobName = "AI-Analyzer";
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -61,7 +62,8 @@ public class AiAnalyzerService : IAiAnalyzerService
             var runLog = new RunLog
             {
                 StartedAt = DateTime.UtcNow,
-                Status = "Running"
+                Status = "Running",
+                JobName = JobName
             };
             _dbContext.RunLogs.Add(runLog);
             await _dbContext.SaveChangesAsync(cancellationToken);

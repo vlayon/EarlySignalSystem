@@ -32,7 +32,8 @@ public class DataCollectorService : IDataCollectorService
         var runLog = new RunLog
         {
             StartedAt = DateTime.UtcNow,
-            Status = "Running"
+            Status = "Running",
+            JobName = EurLexSource
         };
         _dbContext.RunLogs.Add(runLog);
         await _dbContext.SaveChangesAsync(cancellationToken);
@@ -133,7 +134,8 @@ public class DataCollectorService : IDataCollectorService
         var runLog = new RunLog
         {
             StartedAt = DateTime.UtcNow,
-            Status = "Running"
+            Status = "Running",
+            JobName = SecEdgarSource
         };
         _dbContext.RunLogs.Add(runLog);
         await _dbContext.SaveChangesAsync(cancellationToken);
@@ -179,7 +181,7 @@ public class DataCollectorService : IDataCollectorService
                     Source = SecEdgarSource,
                     SignalType = InsiderBuyingSignalType,
                     SourceUrl = filing.IndexUrl,
-                    Title = $"{purchase.ReportingOwnerName} bought {purchase.TotalShares:N0} shares of {purchase.IssuerName}",
+                    Title = $"{purchase.ReportingOwnerName} ({purchase.Role}) bought {purchase.TotalShares:N0} shares of {purchase.IssuerName}",
                     RawContent = $"Issuer: {purchase.IssuerName} ({purchase.Ticker}); Insider: {purchase.ReportingOwnerName}; Shares: {purchase.TotalShares:N0}; Avg price: {purchase.WeightedAveragePrice:0.00}; Transaction date: {purchase.TransactionDate:yyyy-MM-dd}",
                     Ticker = purchase.Ticker,
                     PublishedAt = purchase.TransactionDate,
@@ -290,6 +292,9 @@ public class DataCollectorService : IDataCollectorService
             return null;
         }
 
+        var relationship = document.Root?.Element("reportingOwner")?.Element("reportingOwnerRelationship");
+        var role = DetermineInsiderRole(relationship);
+
         var purchaseTransactions = document.Root?
             .Element("nonDerivativeTable")?
             .Elements("nonDerivativeTransaction")
@@ -326,7 +331,52 @@ public class DataCollectorService : IDataCollectorService
             return null;
         }
 
-        return new SecEdgarPurchase(issuerName, ticker, ownerName, totalShares, totalCost / totalShares, transactionDate);
+        return new SecEdgarPurchase(issuerName, ticker, ownerName, role, totalShares, totalCost / totalShares, transactionDate);
+    }
+
+    // officerTitle е свободен текст ("Chief Executive Officer", "EVP & General Counsel"...) — нормализираме
+    // към кратки категории, за да могат Insiders.razor филтрите (By Role) да работят с точно съвпадение.
+    private static string DetermineInsiderRole(XElement? relationship)
+    {
+        if (relationship is null)
+        {
+            return "Insider";
+        }
+
+        var isOfficer = relationship.Element("isOfficer")?.Value.Trim() == "1";
+        var officerTitle = relationship.Element("officerTitle")?.Value.Trim();
+
+        if (isOfficer && !string.IsNullOrWhiteSpace(officerTitle))
+        {
+            if (officerTitle.Contains("chief executive", StringComparison.OrdinalIgnoreCase))
+            {
+                return "CEO";
+            }
+
+            if (officerTitle.Contains("chief financial", StringComparison.OrdinalIgnoreCase))
+            {
+                return "CFO";
+            }
+
+            if (officerTitle.Contains("chief operating", StringComparison.OrdinalIgnoreCase))
+            {
+                return "COO";
+            }
+
+            return officerTitle;
+        }
+
+        if (relationship.Element("isDirector")?.Value.Trim() == "1")
+        {
+            return "Director";
+        }
+
+        if (relationship.Element("isTenPercentOwner")?.Value.Trim() == "1")
+        {
+            return "10% Owner";
+        }
+
+        return "Insider";
     }
 
     private static decimal ParseDecimal(string? raw) =>
@@ -343,7 +393,7 @@ public class DataCollectorService : IDataCollectorService
 
     private sealed record SecEdgarFilingRef(string IndexUrl, DateTime FiledAt);
 
-    private sealed record SecEdgarPurchase(string IssuerName, string? Ticker, string ReportingOwnerName, decimal TotalShares, decimal WeightedAveragePrice, DateTime TransactionDate);
+    private sealed record SecEdgarPurchase(string IssuerName, string? Ticker, string ReportingOwnerName, string Role, decimal TotalShares, decimal WeightedAveragePrice, DateTime TransactionDate);
 
     private const string TedSource = "TED";
     private const string GovernmentContractSignalType = "GovernmentContract";
@@ -355,7 +405,8 @@ public class DataCollectorService : IDataCollectorService
         var runLog = new RunLog
         {
             StartedAt = DateTime.UtcNow,
-            Status = "Running"
+            Status = "Running",
+            JobName = TedSource
         };
         _dbContext.RunLogs.Add(runLog);
         await _dbContext.SaveChangesAsync(cancellationToken);
@@ -538,7 +589,8 @@ public class DataCollectorService : IDataCollectorService
         var runLog = new RunLog
         {
             StartedAt = DateTime.UtcNow,
-            Status = "Running"
+            Status = "Running",
+            JobName = OecdSource
         };
         _dbContext.RunLogs.Add(runLog);
         await _dbContext.SaveChangesAsync(cancellationToken);
@@ -718,7 +770,8 @@ public class DataCollectorService : IDataCollectorService
         var runLog = new RunLog
         {
             StartedAt = DateTime.UtcNow,
-            Status = "Running"
+            Status = "Running",
+            JobName = EsmaSource
         };
         _dbContext.RunLogs.Add(runLog);
         await _dbContext.SaveChangesAsync(cancellationToken);

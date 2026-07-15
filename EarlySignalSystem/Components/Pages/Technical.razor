@@ -1,0 +1,310 @@
+@page "/technical"
+@rendermode InteractiveServer
+@using EarlySignalSystem.Data
+@using EarlySignalSystem.Models
+@using EarlySignalSystem.Services
+@using Microsoft.EntityFrameworkCore
+@inject IDbContextFactory<AppDbContext> DbContextFactory
+
+<PageTitle>Technical Dashboard</PageTitle>
+
+<MudContainer MaxWidth="MaxWidth.Large" Class="py-6">
+    <MudStack Spacing="0" Class="mb-6">
+        <MudText Typo="Typo.h4" Style="font-weight:700;">Technical Dashboard</MudText>
+        <MudText Typo="Typo.body2" Class="mud-text-secondary">System monitoring and scan history</MudText>
+    </MudStack>
+
+    @if (_loading)
+    {
+        <MudProgressCircular Indeterminate="true" Color="Color.Primary" />
+    }
+    else
+    {
+        <MudText Typo="Typo.h5" Style="font-weight:600;" Class="mb-3">Canal Status</MudText>
+        <MudGrid Class="mb-6">
+            @foreach (var card in _canalCards)
+            {
+                <MudItem xs="12" sm="6" md="4">
+                    <MudCard Style="@($"background:#1a1d2e; border-left:4px solid {GetCanalBorderColor(card)}; height:100%;")">
+                        <MudCardContent>
+                            <MudStack Row="true" Justify="Justify.SpaceBetween" AlignItems="AlignItems.Center">
+                                <MudText Typo="Typo.h6" Style="font-weight:700;">@card.DisplayName</MudText>
+                                <MudChip T="string" Color="@GetCanalStatusColor(card)" Variant="Variant.Filled" Size="Size.Small">@GetCanalStatusLabel(card)</MudChip>
+                            </MudStack>
+
+                            @if (card.IsDisabled)
+                            {
+                                <MudText Typo="Typo.body2" Class="mud-text-secondary mt-2">Collector temporarily disabled</MudText>
+                            }
+                            else if (card.LatestRun is null)
+                            {
+                                <MudText Typo="Typo.body2" Class="mud-text-secondary mt-2">No runs yet</MudText>
+                            }
+                            else
+                            {
+                                <MudText Typo="Typo.body2" Class="mt-2">@card.MetricLabel: @card.LatestRun.SignalsCollected</MudText>
+                                <MudText Typo="Typo.body2" Class="mud-text-secondary">Duration: @GetDurationLabel(card.LatestRun)</MudText>
+                                <MudText Typo="Typo.body2" Class="mud-text-secondary">@card.LatestRun.StartedAt.ToString("dd MMM yyyy, HH:mm")</MudText>
+                            }
+                        </MudCardContent>
+                    </MudCard>
+                </MudItem>
+            }
+        </MudGrid>
+
+        <MudText Typo="Typo.h5" Style="font-weight:600;" Class="mb-3">Last Scan Summary</MudText>
+        <MudGrid Class="mb-6">
+            <MudItem xs="12" sm="6" md="3">
+                <MudCard Style="background:#1a1d2e; height:100%;">
+                    <MudCardContent>
+                        <MudText Typo="Typo.body2" Class="mud-text-secondary">Total signals collected</MudText>
+                        <MudText Typo="Typo.h4" Style="font-weight:700;">@_totalSignalsToday</MudText>
+                    </MudCardContent>
+                </MudCard>
+            </MudItem>
+            <MudItem xs="12" sm="6" md="3">
+                <MudCard Style="background:#1a1d2e; height:100%;">
+                    <MudCardContent>
+                        <MudText Typo="Typo.body2" Class="mud-text-secondary">Companies analyzed</MudText>
+                        <MudText Typo="Typo.h4" Style="font-weight:700;">@_companiesAnalyzedToday</MudText>
+                    </MudCardContent>
+                </MudCard>
+            </MudItem>
+            <MudItem xs="12" sm="6" md="3">
+                <MudCard Style="background:#1a1d2e; height:100%;">
+                    <MudCardContent>
+                        <MudText Typo="Typo.body2" Class="mud-text-secondary">Shortlist size</MudText>
+                        <MudText Typo="Typo.h4" Style="font-weight:700;">@_shortlistSize</MudText>
+                    </MudCardContent>
+                </MudCard>
+            </MudItem>
+            <MudItem xs="12" sm="6" md="3">
+                <MudCard Style="background:#1a1d2e; height:100%;">
+                    <MudCardContent>
+                        <MudText Typo="Typo.body2" Class="mud-text-secondary">Last scan</MudText>
+                        <MudText Typo="Typo.h6" Style="font-weight:700;">@(_lastScanTimestamp?.ToString("dd MMM yyyy, HH:mm") ?? "—")</MudText>
+                    </MudCardContent>
+                </MudCard>
+            </MudItem>
+        </MudGrid>
+
+        <MudText Typo="Typo.h5" Style="font-weight:600;" Class="mb-3">Scan History · Last 30 days</MudText>
+        @if (_scanHistoryRows.Count == 0)
+        {
+            <MudAlert Severity="Severity.Info">No scan history yet.</MudAlert>
+        }
+        else
+        {
+            <MudTable Items="@_scanHistoryRows" Hover="true" Dense="true" Style="background:#1a1d2e;">
+                <HeaderContent>
+                    <MudTh>Date</MudTh>
+                    <MudTh>EUR-Lex</MudTh>
+                    <MudTh>TED</MudTh>
+                    <MudTh>SEC EDGAR</MudTh>
+                    <MudTh>AI Analyzer</MudTh>
+                    <MudTh>Companies</MudTh>
+                    <MudTh>Status</MudTh>
+                </HeaderContent>
+                <RowTemplate>
+                    <MudTd DataLabel="Date">@context.Date.ToString("dd MMM yyyy")</MudTd>
+                    <MudTd DataLabel="EUR-Lex">@FormatSignalCount(context.EurLexSignals)</MudTd>
+                    <MudTd DataLabel="TED">@FormatSignalCount(context.TedSignals)</MudTd>
+                    <MudTd DataLabel="SEC EDGAR">@FormatSignalCount(context.SecEdgarSignals)</MudTd>
+                    <MudTd DataLabel="AI Analyzer">@FormatSignalCount(context.AiAnalyzerSignals)</MudTd>
+                    <MudTd DataLabel="Companies">@context.Companies</MudTd>
+                    <MudTd DataLabel="Status">
+                        <MudChip T="string" Color="@GetHistoryStatusColor(context.Status)" Variant="Variant.Filled" Size="Size.Small">@context.Status</MudChip>
+                    </MudTd>
+                </RowTemplate>
+            </MudTable>
+        }
+    }
+</MudContainer>
+
+@code {
+    private const string NeutralBorderColor = "#374151";
+
+    private bool _loading = true;
+    private List<CanalCard> _canalCards = [];
+    private int _totalSignalsToday;
+    private int _companiesAnalyzedToday;
+    private int _shortlistSize;
+    private DateTime? _lastScanTimestamp;
+    private List<ScanHistoryRow> _scanHistoryRows = [];
+
+    protected override async Task OnInitializedAsync()
+    {
+        await using var dbContext = await DbContextFactory.CreateDbContextAsync();
+
+        var today = DateTime.UtcNow.Date;
+
+        var latestRunLogs = new Dictionary<string, RunLog?>();
+        foreach (var jobName in new[] { "EUR-Lex", "SEC-EDGAR", "TED", "AI-Analyzer", "Cumulative-Scorer" })
+        {
+            latestRunLogs[jobName] = await dbContext.RunLogs
+                .Where(r => r.JobName == jobName)
+                .OrderByDescending(r => r.StartedAt)
+                .FirstOrDefaultAsync();
+        }
+
+        _canalCards =
+        [
+            new CanalCard("EUR-Lex", "Signals collected", latestRunLogs["EUR-Lex"], false),
+            new CanalCard("SEC EDGAR Form 4", "Signals collected", latestRunLogs["SEC-EDGAR"], false),
+            new CanalCard("TED", "Signals collected", latestRunLogs["TED"], false),
+            new CanalCard("OECD", "Signals collected", null, true),
+            new CanalCard("ESMA", "Signals collected", null, true),
+            new CanalCard("AI Analyzer", "Signals analyzed", latestRunLogs["AI-Analyzer"], false),
+            new CanalCard("Cumulative Scorer", "Companies scored", latestRunLogs["Cumulative-Scorer"], false),
+        ];
+
+        _totalSignalsToday = await dbContext.RunLogs
+            .Where(r => r.StartedAt >= today && r.StartedAt < today.AddDays(1)
+                && r.JobName != null && new[] { "EUR-Lex", "SEC-EDGAR", "TED", "ESMA" }.Contains(r.JobName))
+            .SumAsync(r => (int?)r.SignalsCollected) ?? 0;
+
+        _companiesAnalyzedToday = await dbContext.CompanyPicks
+            .Where(c => c.PickedAt >= today && c.PickedAt < today.AddDays(1))
+            .Select(c => new { c.Ticker, c.CompanyName })
+            .Distinct()
+            .CountAsync();
+
+        var latestScanKey = await dbContext.ShortlistSnapshots
+            .OrderByDescending(s => s.ScanDate)
+            .ThenByDescending(s => s.ScanNumber)
+            .Select(s => new { s.ScanDate, s.ScanNumber })
+            .FirstOrDefaultAsync();
+
+        if (latestScanKey is not null)
+        {
+            _shortlistSize = await dbContext.ShortlistSnapshots
+                .CountAsync(s => s.ScanDate == latestScanKey.ScanDate && s.ScanNumber == latestScanKey.ScanNumber);
+
+            _lastScanTimestamp = await dbContext.ShortlistSnapshots
+                .Where(s => s.ScanDate == latestScanKey.ScanDate && s.ScanNumber == latestScanKey.ScanNumber)
+                .MaxAsync(s => (DateTime?)s.CreatedAt);
+        }
+
+        await LoadScanHistoryAsync(dbContext, today);
+
+        _loading = false;
+    }
+
+    private async Task LoadScanHistoryAsync(AppDbContext dbContext, DateTime today)
+    {
+        var windowStart = today.AddDays(-29);
+
+        var runLogs = await dbContext.RunLogs
+            .Where(r => r.StartedAt >= windowStart)
+            .ToListAsync();
+
+        var picks = await dbContext.CompanyPicks
+            .Where(p => p.PickedAt >= windowStart)
+            .Select(p => new { p.Ticker, p.CompanyName, p.PickedAt })
+            .ToListAsync();
+
+        var dates = runLogs.Select(r => r.StartedAt.Date)
+            .Concat(picks.Select(p => p.PickedAt.Date))
+            .Distinct()
+            .OrderByDescending(d => d)
+            .ToList();
+
+        var rows = new List<ScanHistoryRow>();
+        foreach (var date in dates)
+        {
+            var dayRuns = runLogs.Where(r => r.StartedAt.Date == date).ToList();
+
+            var companies = picks.Where(p => p.PickedAt.Date == date)
+                .Select(p => new { p.Ticker, p.CompanyName })
+                .Distinct()
+                .Count();
+
+            var status = dayRuns.Count == 0
+                ? "No runs"
+                : dayRuns.Any(r => r.Status == "Failed") ? "Failed" : "Success";
+
+            rows.Add(new ScanHistoryRow(
+                date,
+                GetSignalsForJob(dayRuns, "EUR-Lex"),
+                GetSignalsForJob(dayRuns, "TED"),
+                GetSignalsForJob(dayRuns, "SEC-EDGAR"),
+                GetSignalsForJob(dayRuns, "AI-Analyzer"),
+                companies,
+                status));
+        }
+
+        _scanHistoryRows = rows;
+    }
+
+    private static int? GetSignalsForJob(List<RunLog> dayRuns, string jobName)
+    {
+        var jobRuns = dayRuns.Where(r => r.JobName == jobName).ToList();
+        return jobRuns.Count == 0 ? null : jobRuns.Sum(r => r.SignalsCollected);
+    }
+
+    private static string FormatSignalCount(int? count) => count?.ToString() ?? "–";
+
+    private static string GetCanalBorderColor(CanalCard card)
+    {
+        if (card.IsDisabled)
+        {
+            return NeutralBorderColor;
+        }
+
+        return card.LatestRun?.Status switch
+        {
+            "Completed" => EarlySignalTheme.ColorSuccess,
+            "Failed" => EarlySignalTheme.ColorDanger,
+            "Running" => EarlySignalTheme.ColorWarning,
+            _ => NeutralBorderColor,
+        };
+    }
+
+    private static Color GetCanalStatusColor(CanalCard card)
+    {
+        if (card.IsDisabled)
+        {
+            return Color.Default;
+        }
+
+        return card.LatestRun?.Status switch
+        {
+            "Completed" => Color.Success,
+            "Failed" => Color.Error,
+            "Running" => Color.Warning,
+            _ => Color.Default,
+        };
+    }
+
+    private static string GetCanalStatusLabel(CanalCard card)
+    {
+        if (card.IsDisabled)
+        {
+            return "Disabled";
+        }
+
+        return card.LatestRun?.Status ?? "No runs yet";
+    }
+
+    private static string GetDurationLabel(RunLog run)
+    {
+        if (run.CompletedAt is null)
+        {
+            return "—";
+        }
+
+        var duration = run.CompletedAt.Value - run.StartedAt;
+        return duration.TotalSeconds < 60 ? $"{duration.TotalSeconds:0.0}s" : $"{duration.TotalMinutes:0.0}m";
+    }
+
+    private static Color GetHistoryStatusColor(string status) => status switch
+    {
+        "Success" => Color.Success,
+        "Failed" => Color.Error,
+        _ => Color.Default,
+    };
+
+    private sealed record CanalCard(string DisplayName, string MetricLabel, RunLog? LatestRun, bool IsDisabled);
+
+    private sealed record ScanHistoryRow(DateTime Date, int? EurLexSignals, int? TedSignals, int? SecEdgarSignals, int? AiAnalyzerSignals, int Companies, string Status);
+}

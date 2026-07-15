@@ -1,0 +1,145 @@
+@page "/history"
+@rendermode InteractiveServer
+@using EarlySignalSystem.Data
+@using EarlySignalSystem.Models
+@using Microsoft.EntityFrameworkCore
+@inject IDbContextFactory<AppDbContext> DbContextFactory
+
+<PageTitle>Shortlist History</PageTitle>
+
+<MudContainer MaxWidth="MaxWidth.Large" Class="py-6">
+    <MudStack Spacing="0" Class="mb-6">
+        <MudText Typo="Typo.h4" Style="font-weight:700;">Shortlist History</MudText>
+        <MudText Typo="Typo.body2" Class="mud-text-secondary">Daily snapshots of top investment signals</MudText>
+    </MudStack>
+
+    @if (_loading)
+    {
+        <MudProgressCircular Indeterminate="true" Color="Color.Primary" />
+    }
+    else if (_groups.Count == 0)
+    {
+        <MudAlert Severity="Severity.Info">No historical data yet. History builds up after the first scan.</MudAlert>
+    }
+    else
+    {
+        <MudExpansionPanels>
+            @foreach (var group in _groups)
+            {
+                <MudExpansionPanel>
+                    <TitleContent>
+                        <MudText Typo="Typo.subtitle1" Style="font-weight:600;">
+                            📅 @group.Key.ScanDate.ToString("dd MMM yyyy") — Scan #@group.Key.ScanNumber · @group.Companies.Count companies
+                        </MudText>
+                    </TitleContent>
+                    <ChildContent>
+                        <MudGrid>
+                            @foreach (var entry in group.Companies)
+                            {
+                                <MudItem xs="12" sm="6" md="4">
+                                    <MudCard Style="background:#20243a; height:100%;">
+                                        <MudCardContent>
+                                            <MudStack Row="true" Justify="Justify.SpaceBetween" AlignItems="AlignItems.Start">
+                                                <MudStack Spacing="0">
+                                                    <MudText Typo="Typo.body2" Class="mud-text-secondary">#@entry.CompanyRank</MudText>
+                                                    <MudText Typo="Typo.h6" Style="font-weight:700;">@entry.Ticker</MudText>
+                                                    <MudText Typo="Typo.body2" Class="mud-text-secondary">@entry.CompanyName</MudText>
+                                                </MudStack>
+                                                <MudStack Spacing="1" AlignItems="AlignItems.End">
+                                                    @if (!string.IsNullOrWhiteSpace(entry.Sentiment))
+                                                    {
+                                                        <MudChip T="string" Color="@GetSentimentColor(entry.Sentiment)" Variant="Variant.Filled" Size="Size.Small">@GetSentimentLabel(entry.Sentiment)</MudChip>
+                                                    }
+                                                    <MudChip T="string" Color="@GetScoreColor(entry.CumulativeScore)" Variant="Variant.Filled" Size="Size.Small">
+                                                        @entry.CumulativeScore.ToString("0.0")
+                                                    </MudChip>
+                                                </MudStack>
+                                            </MudStack>
+
+                                            @if (!string.IsNullOrWhiteSpace(entry.Sector))
+                                            {
+                                                <MudChip T="string" Color="Color.Primary" Variant="Variant.Outlined" Size="Size.Small" Class="mt-2">@entry.Sector</MudChip>
+                                            }
+
+                                            <MudStack Row="true" Spacing="1" Class="mt-2">
+                                                <MudChip T="string" Variant="Variant.Filled" Size="Size.Small" Color="Color.Default">@entry.SignalCount signals</MudChip>
+                                                <MudChip T="string" Variant="Variant.Filled" Size="Size.Small" Color="@GetVelocityColor(entry.VelocityLevel)">@GetVelocityLabel(entry.VelocityLevel)</MudChip>
+                                            </MudStack>
+
+                                            @if (!string.IsNullOrWhiteSpace(entry.Rationale))
+                                            {
+                                                <MudText Typo="Typo.body2" Class="mt-3">@entry.Rationale</MudText>
+                                            }
+                                        </MudCardContent>
+                                    </MudCard>
+                                </MudItem>
+                            }
+                        </MudGrid>
+                    </ChildContent>
+                </MudExpansionPanel>
+            }
+        </MudExpansionPanels>
+    }
+</MudContainer>
+
+@code {
+    private bool _loading = true;
+    private List<ScanGroup> _groups = [];
+
+    protected override async Task OnInitializedAsync()
+    {
+        await using var dbContext = await DbContextFactory.CreateDbContextAsync();
+
+        var snapshots = await dbContext.ShortlistSnapshots
+            .OrderBy(s => s.CompanyRank)
+            .ToListAsync();
+
+        _groups = snapshots
+            .GroupBy(s => new ScanKey(s.ScanDate, s.ScanNumber))
+            .Select(g => new ScanGroup(g.Key, g.ToList()))
+            .OrderByDescending(g => g.Key.ScanDate)
+            .ThenByDescending(g => g.Key.ScanNumber)
+            .ToList();
+
+        _loading = false;
+    }
+
+    private static Color GetScoreColor(decimal score) => score switch
+    {
+        >= 70 => Color.Success,
+        >= 40 => Color.Warning,
+        _ => Color.Error,
+    };
+
+    private static Color GetVelocityColor(VelocityLevel level) => level switch
+    {
+        VelocityLevel.High => Color.Error,
+        VelocityLevel.Medium => Color.Warning,
+        _ => Color.Default,
+    };
+
+    private static string GetVelocityLabel(VelocityLevel level) => level switch
+    {
+        VelocityLevel.High => "🔥 High velocity",
+        VelocityLevel.Medium => "⚡ Medium velocity",
+        _ => "· Low velocity",
+    };
+
+    private static Color GetSentimentColor(string sentiment) => sentiment switch
+    {
+        "Bullish" => Color.Success,
+        "Bearish" => Color.Error,
+        _ => Color.Default,
+    };
+
+    private static string GetSentimentLabel(string sentiment) => sentiment switch
+    {
+        "Bullish" => "↑ Bullish",
+        "Bearish" => "↓ Bearish",
+        _ => "→ Neutral",
+    };
+
+    private sealed record ScanKey(DateTime ScanDate, int ScanNumber);
+
+    private sealed record ScanGroup(ScanKey Key, List<ShortlistSnapshot> Companies);
+}

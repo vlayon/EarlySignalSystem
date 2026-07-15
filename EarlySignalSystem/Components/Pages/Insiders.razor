@@ -1,0 +1,204 @@
+@page "/insiders"
+@rendermode InteractiveServer
+@using System.Globalization
+@using System.Text.RegularExpressions
+@using EarlySignalSystem.Data
+@using EarlySignalSystem.Models
+@using Microsoft.EntityFrameworkCore
+@inject IDbContextFactory<AppDbContext> DbContextFactory
+
+<PageTitle>Insider Activity</PageTitle>
+
+<MudContainer MaxWidth="MaxWidth.Large" Class="py-6">
+    <MudStack Spacing="0" Class="mb-6">
+        <MudText Typo="Typo.h4" Style="font-weight:700;">Insider Activity</MudText>
+        <MudText Typo="Typo.body2" Class="mud-text-secondary">SEC Form 4 open-market purchases · Last 30 days</MudText>
+    </MudStack>
+
+    <MudGrid Class="mb-6">
+        <MudItem xs="12" sm="4">
+            <MudSelect T="decimal" Label="By Value" Value="_minValue" ValueChanged="OnMinValueChangedAsync" Variant="Variant.Outlined">
+                <MudSelectItem Value="0m">All</MudSelectItem>
+                <MudSelectItem Value="100000m">$100K+</MudSelectItem>
+                <MudSelectItem Value="500000m">$500K+</MudSelectItem>
+                <MudSelectItem Value="1000000m">$1M+</MudSelectItem>
+            </MudSelect>
+        </MudItem>
+        <MudItem xs="12" sm="4">
+            <MudSelect T="string" Label="By Role" Value="_selectedRole" ValueChanged="OnRoleChangedAsync" Variant="Variant.Outlined">
+                <MudSelectItem Value="@("All")">All</MudSelectItem>
+                <MudSelectItem Value="@("CEO")">CEO</MudSelectItem>
+                <MudSelectItem Value="@("CFO")">CFO</MudSelectItem>
+                <MudSelectItem Value="@("Director")">Director</MudSelectItem>
+            </MudSelect>
+        </MudItem>
+        <MudItem xs="12" sm="4">
+            <MudSelect T="int" Label="By Days" Value="_days" ValueChanged="OnDaysChangedAsync" Variant="Variant.Outlined">
+                <MudSelectItem Value="7">7 days</MudSelectItem>
+                <MudSelectItem Value="14">14 days</MudSelectItem>
+                <MudSelectItem Value="30">30 days</MudSelectItem>
+            </MudSelect>
+        </MudItem>
+    </MudGrid>
+
+    @if (_loading)
+    {
+        <MudProgressCircular Indeterminate="true" Color="Color.Primary" />
+    }
+    else if (_purchases.Count == 0)
+    {
+        <MudAlert Severity="Severity.Info">No insider purchases recorded yet. SEC EDGAR is scanned daily at 18:10.</MudAlert>
+    }
+    else
+    {
+        <MudGrid>
+            @foreach (var purchase in _purchases)
+            {
+                <MudItem xs="12" sm="6" md="4">
+                    <MudCard Style="background:#1a1d2e; height:100%;">
+                        <MudCardContent>
+                            <MudStack Row="true" Justify="Justify.SpaceBetween" AlignItems="AlignItems.Start">
+                                <MudStack Spacing="0">
+                                    <MudText Typo="Typo.h6" Style="font-weight:700;">@purchase.InsiderName</MudText>
+                                    <MudText Typo="Typo.body2" Class="mud-text-secondary">@purchase.Role</MudText>
+                                </MudStack>
+                                @if (!string.IsNullOrWhiteSpace(purchase.Ticker) && _clusterTickers.Contains(purchase.Ticker))
+                                {
+                                    <MudChip T="string" Color="Color.Error" Variant="Variant.Filled" Size="Size.Small">🔥 Cluster Buying</MudChip>
+                                }
+                            </MudStack>
+
+                            <MudStack Row="true" Spacing="2" AlignItems="AlignItems.Center" Class="mt-2">
+                                <MudText Typo="Typo.body1" Style="font-weight:600;">@purchase.CompanyName</MudText>
+                                @if (!string.IsNullOrWhiteSpace(purchase.Ticker))
+                                {
+                                    <MudChip T="string" Color="Color.Primary" Variant="Variant.Outlined" Size="Size.Small">@purchase.Ticker</MudChip>
+                                }
+                            </MudStack>
+
+                            <MudText Typo="Typo.body2" Class="mt-2">@purchase.Shares.ToString("N0") shares @@ $@purchase.Price.ToString("0.00")</MudText>
+                            <MudText Typo="Typo.body2" Style="font-weight:600;">Total: $@purchase.TotalValue.ToString("N0")</MudText>
+
+                            <MudStack Row="true" Justify="Justify.SpaceBetween" AlignItems="AlignItems.Center" Class="mt-3">
+                                <MudText Typo="Typo.caption" Class="mud-text-secondary">@purchase.PublishedAt.ToString("dd MMM yyyy")</MudText>
+                                <MudChip T="string" Color="Color.Success" Variant="Variant.Outlined" Size="Size.Small">Open Market Purchase</MudChip>
+                            </MudStack>
+                        </MudCardContent>
+                    </MudCard>
+                </MudItem>
+            }
+        </MudGrid>
+    }
+</MudContainer>
+
+@code {
+    private const string SecEdgarSource = "SEC-EDGAR";
+    private const string InsiderBuyingSignalType = "InsiderBuying";
+    private const int ClusterWindowDays = 14;
+    private const int ClusterMinDistinctInsiders = 2;
+
+    private bool _loading = true;
+    private decimal _minValue;
+    private string _selectedRole = "All";
+    private int _days = 30;
+    private List<InsiderPurchase> _purchases = [];
+    private HashSet<string> _clusterTickers = [];
+
+    protected override async Task OnInitializedAsync() => await LoadDataAsync();
+
+    private async Task OnMinValueChangedAsync(decimal value)
+    {
+        _minValue = value;
+        await LoadDataAsync();
+    }
+
+    private async Task OnRoleChangedAsync(string value)
+    {
+        _selectedRole = value;
+        await LoadDataAsync();
+    }
+
+    private async Task OnDaysChangedAsync(int value)
+    {
+        _days = value;
+        await LoadDataAsync();
+    }
+
+    private async Task LoadDataAsync()
+    {
+        _loading = true;
+
+        await using var dbContext = await DbContextFactory.CreateDbContextAsync();
+
+        var clusterWindowStart = DateTime.UtcNow.AddDays(-ClusterWindowDays);
+        var clusterSignals = await dbContext.Signals
+            .Where(s => s.Source == SecEdgarSource && s.SignalType == InsiderBuyingSignalType && s.PublishedAt >= clusterWindowStart)
+            .ToListAsync();
+
+        _clusterTickers = clusterSignals
+            .Select(ParsePurchase)
+            .Where(p => p is not null && !string.IsNullOrWhiteSpace(p.Ticker))
+            .GroupBy(p => p!.Ticker!)
+            .Where(g => g.Select(p => p!.InsiderName).Distinct().Count() >= ClusterMinDistinctInsiders)
+            .Select(g => g.Key)
+            .ToHashSet();
+
+        var windowStart = DateTime.UtcNow.AddDays(-_days);
+        var signals = await dbContext.Signals
+            .Where(s => s.Source == SecEdgarSource && s.SignalType == InsiderBuyingSignalType && s.PublishedAt >= windowStart)
+            .OrderByDescending(s => s.PublishedAt)
+            .ToListAsync();
+
+        var purchases = signals
+            .Select(ParsePurchase)
+            .Where(p => p is not null)
+            .Select(p => p!)
+            .AsEnumerable();
+
+        if (_minValue > 0)
+        {
+            purchases = purchases.Where(p => p.TotalValue >= _minValue);
+        }
+
+        if (_selectedRole != "All")
+        {
+            purchases = purchases.Where(p => p.Role == _selectedRole);
+        }
+
+        _purchases = purchases.ToList();
+        _loading = false;
+    }
+
+    // RawContent идва във формат "Issuer: X (TICK); Insider: Y; Shares: N; Avg price: P; Transaction date: D"
+    // (виж DataCollectorService.CollectSecEdgarSignalsAsync), а Role e вградена в Title като "Name (Role) bought...".
+    private static InsiderPurchase? ParsePurchase(Signal signal)
+    {
+        var contentMatch = Regex.Match(
+            signal.RawContent ?? string.Empty,
+            @"Issuer: (?<issuer>.*?) \((?<ticker>.*?)\); Insider: (?<insider>.*?); Shares: (?<shares>[\d,]+); Avg price: (?<price>[\d.]+)");
+
+        if (!contentMatch.Success)
+        {
+            return null;
+        }
+
+        var titleMatch = Regex.Match(signal.Title, @"^.+? \((?<role>[^)]+)\) bought");
+        var role = titleMatch.Success ? titleMatch.Groups["role"].Value : "Insider";
+
+        var shares = decimal.Parse(contentMatch.Groups["shares"].Value, NumberStyles.Any, CultureInfo.InvariantCulture);
+        var price = decimal.Parse(contentMatch.Groups["price"].Value, NumberStyles.Any, CultureInfo.InvariantCulture);
+
+        return new InsiderPurchase(
+            signal.Id,
+            contentMatch.Groups["insider"].Value,
+            role,
+            contentMatch.Groups["issuer"].Value,
+            signal.Ticker,
+            shares,
+            price,
+            shares * price,
+            signal.PublishedAt);
+    }
+
+    private sealed record InsiderPurchase(int SignalId, string InsiderName, string Role, string CompanyName, string? Ticker, decimal Shares, decimal Price, decimal TotalValue, DateTime PublishedAt);
+}
