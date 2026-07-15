@@ -175,7 +175,7 @@
     {
         var contentMatch = Regex.Match(
             signal.RawContent ?? string.Empty,
-            @"Issuer: (?<issuer>.*?) \((?<ticker>.*?)\); Insider: (?<insider>.*?); Shares: (?<shares>[\d,]+); Avg price: (?<price>[\d.]+)");
+            @"Issuer: (?<issuer>.*?) \((?<ticker>.*?)\); Insider: (?<insider>.*?); Shares: (?<shares>[\d,\s]+); Avg price: (?<price>[\d.]+)");
 
         if (!contentMatch.Success)
         {
@@ -185,7 +185,10 @@
         var titleMatch = Regex.Match(signal.Title, @"^.+? \((?<role>[^)]+)\) bought");
         var role = titleMatch.Success ? titleMatch.Groups["role"].Value : "Insider";
 
-        var shares = decimal.Parse(contentMatch.Groups["shares"].Value, NumberStyles.Any, CultureInfo.InvariantCulture);
+        // Shares is written with {value:N0} at collection time, so its group separator follows the
+        // collector machine's culture (comma, space, or non-breaking space) — strip everything but digits.
+        var sharesDigitsOnly = Regex.Replace(contentMatch.Groups["shares"].Value, @"[^\d]", "");
+        var shares = decimal.Parse(sharesDigitsOnly, NumberStyles.None, CultureInfo.InvariantCulture);
         var price = decimal.Parse(contentMatch.Groups["price"].Value, NumberStyles.Any, CultureInfo.InvariantCulture);
 
         return new InsiderPurchase(
