@@ -11,4 +11,10 @@ public class CumulativeScore
     public int SignalDiversity { get; set; }
     public VelocityLevel VelocityLevel { get; set; }
     public DateTime LastCalculatedAt { get; set; }
+
+    public DateTime? FirstSignalDate { get; set; }
+    public decimal? PriceOnFirstSignalDate { get; set; }
+    public decimal? LatestPrice { get; set; }
+    public DateTime? LatestPriceDate { get; set; }
+    public decimal? PriceChangePercent { get; set; }
 }

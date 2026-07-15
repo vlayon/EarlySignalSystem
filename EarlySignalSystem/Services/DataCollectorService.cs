@@ -939,4 +939,193 @@ public class DataCollectorService : IDataCollectorService
     }
 
     private sealed record EsmaShortPosition(string IssuerName, string Isin, DateTime PositionDate, decimal NetShortPositionPercent);
+
+    private const string SecEdgar13DGSource = "SEC-EDGAR-13DG";
+    private const string MajorAcquisitionSignalType = "MajorAcquisition";
+    private const string SecEdgar13DFeedUrl = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=SC+13D&dateb=&owner=include&count=40&search_text=&output=atom";
+    private const string SecEdgar13GFeedUrl = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=SC+13G&dateb=&owner=include&count=40&search_text=&output=atom";
+
+    public async Task<int> CollectSecEdgar13DGSignalsAsync(CancellationToken cancellationToken = default)
+    {
+        var runLog = new RunLog
+        {
+            StartedAt = DateTime.UtcNow,
+            Status = "Running",
+            JobName = SecEdgar13DGSource
+        };
+        _dbContext.RunLogs.Add(runLog);
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
+        var collected = 0;
+        try
+        {
+            var refs = new List<SecEdgar13DGFilingRef>();
+            refs.AddRange(await FetchSecEdgar13DGFilingRefsAsync(SecEdgar13DFeedUrl, cancellationToken));
+            refs.AddRange(await FetchSecEdgar13DGFilingRefsAsync(SecEdgar13GFeedUrl, cancellationToken));
+
+            var existingLinks = await _dbContext.Signals
+                .Where(s => s.Source == SecEdgar13DGSource)
+                .Select(s => s.SourceUrl)
+                .ToHashSetAsync(cancellationToken);
+
+            foreach (var filingRef in refs)
+            {
+                // Submission-то е достъпно и като plain-text ".txt" на същия път, замествайки "-index.htm" —
+                // това ни дава наведнъж и structured SEC-HEADER-а (issuer/filer имена, дата), и вградения
+                // cover-page текст (за процента), с едно единствено HTTP извикване вместо две-три.
+                var txtUrl = filingRef.IndexUrl.Replace("-index.htm", ".txt", StringComparison.OrdinalIgnoreCase);
+                if (existingLinks.Contains(txtUrl))
+                {
+                    continue;
+                }
+
+                existingLinks.Add(txtUrl);
+
+                SecEdgar13DGFiling? filing;
+                try
+                {
+                    filing = await FetchSecEdgar13DGFilingAsync(txtUrl, filingRef.FormType, cancellationToken);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to parse SEC 13D/13G filing {TxtUrl}", txtUrl);
+                    continue;
+                }
+
+                if (filing is null)
+                {
+                    continue;
+                }
+
+                var percentText = filing.PercentAcquired.HasValue ? $"{filing.PercentAcquired.Value:0.0##}%" : "n/a";
+
+                _dbContext.Signals.Add(new Signal
+                {
+                    Source = SecEdgar13DGSource,
+                    SignalType = MajorAcquisitionSignalType,
+                    SourceUrl = txtUrl,
+                    Title = $"{filing.FilerName} acquired {percentText} of {filing.IssuerName} ({filing.FormType})",
+                    RawContent = $"Issuer: {filing.IssuerName}; Filer: {filing.FilerName}; Percent acquired: {percentText}; Form: {filing.FormType}; Filed: {filing.FiledDate:yyyy-MM-dd}",
+                    PublishedAt = filing.FiledDate,
+                    CollectedAt = DateTime.UtcNow,
+                    Processed = false,
+                    RunLogId = runLog.Id
+                });
+
+                collected++;
+            }
+
+            runLog.Status = "Completed";
+            runLog.SignalsCollected = collected;
+            runLog.CompletedAt = DateTime.UtcNow;
+            await _dbContext.SaveChangesAsync(cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to collect SEC EDGAR 13D/13G signals");
+            runLog.Status = "Failed";
+            runLog.ErrorMessage = ex.Message;
+            runLog.CompletedAt = DateTime.UtcNow;
+            await _dbContext.SaveChangesAsync(cancellationToken);
+            throw;
+        }
+
+        return collected;
+    }
+
+    private async Task<List<SecEdgar13DGFilingRef>> FetchSecEdgar13DGFilingRefsAsync(string feedUrl, CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, feedUrl);
+        request.Headers.TryAddWithoutValidation("User-Agent", SecEdgarUserAgent);
+
+        using var response = await _httpClient.SendAsync(request, cancellationToken);
+        response.EnsureSuccessStatusCode();
+
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        var document = await XDocument.LoadAsync(stream, LoadOptions.None, cancellationToken);
+
+        XNamespace atom = "http://www.w3.org/2005/Atom";
+        var filings = new List<SecEdgar13DGFilingRef>();
+        var seenAccessionNumbers = new HashSet<string>();
+
+        foreach (var entry in document.Descendants(atom + "entry"))
+        {
+            var link = entry.Element(atom + "link")?.Attribute("href")?.Value;
+            if (string.IsNullOrWhiteSpace(link))
+            {
+                continue;
+            }
+
+            // Всяко подаване се появява веднъж под CIK-а на issuer-а и веднъж под CIK-а на филиращото лице —
+            // дедупликираме по accession number, не по URL (виж аналогичния коментар при SEC EDGAR Form 4).
+            var accessionMatch = Regex.Match(link, @"(?<accession>\d{10}-\d{2}-\d{6})-index\.htm", RegexOptions.IgnoreCase);
+            var dedupKey = accessionMatch.Success ? accessionMatch.Groups["accession"].Value : link;
+            if (!seenAccessionNumbers.Add(dedupKey))
+            {
+                continue;
+            }
+
+            var formType = entry.Element(atom + "category")?.Attribute("term")?.Value ?? "SC 13D";
+            filings.Add(new SecEdgar13DGFilingRef(link, formType));
+        }
+
+        return filings;
+    }
+
+    private async Task<SecEdgar13DGFiling?> FetchSecEdgar13DGFilingAsync(string txtUrl, string formType, CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, txtUrl);
+        request.Headers.TryAddWithoutValidation("User-Agent", SecEdgarUserAgent);
+        using var response = await _httpClient.SendAsync(request, cancellationToken);
+        response.EnsureSuccessStatusCode();
+
+        var raw = await response.Content.ReadAsStringAsync(cancellationToken);
+
+        var issuerName = ExtractHeaderName(raw, "SUBJECT COMPANY:");
+        var filerName = ExtractHeaderName(raw, "FILED BY:");
+        if (string.IsNullOrWhiteSpace(issuerName) || string.IsNullOrWhiteSpace(filerName))
+        {
+            return null;
+        }
+
+        var filedDateMatch = Regex.Match(raw, @"FILED AS OF DATE:\s*(?<date>\d{8})");
+        var filedDate = filedDateMatch.Success &&
+            DateTime.TryParseExact(filedDateMatch.Groups["date"].Value, "yyyyMMdd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsedFiledDate)
+            ? parsedFiledDate
+            : DateTime.UtcNow.Date;
+
+        // Процентът е само в cover page-а на самия документ (не в SEC-HEADER-а), под стандартната
+        // точка 13 "PERCENT OF CLASS REPRESENTED BY AMOUNT IN ROW (11)" — потвърдено на живо срещу
+        // реално подаване. Свалят се HTML таговете, за да работи регексът еднакво за .htm и .txt съдържание.
+        var plainText = Regex.Replace(raw, "<[^>]+>", " ");
+        var percentMatch = Regex.Match(
+            plainText,
+            @"PERCENT OF CLASS REPRESENTED BY AMOUNT IN ROW \(11\)\s*(?<percent>\d{1,3}(?:\.\d+)?)",
+            RegexOptions.IgnoreCase);
+        var percent = percentMatch.Success &&
+            decimal.TryParse(percentMatch.Groups["percent"].Value, NumberStyles.Any, CultureInfo.InvariantCulture, out var parsedPercent)
+            ? parsedPercent
+            : (decimal?)null;
+
+        return new SecEdgar13DGFiling(issuerName, filerName, percent, filedDate, formType);
+    }
+
+    // SEC-HEADER-ът структурира filer/issuer имена като "<Label>:\n\n\tCOMPANY DATA:\n\t\tCOMPANY CONFORMED NAME:\t\tXxx"
+    // (или "OWNER DATA" вместо "COMPANY DATA", когато филиращото лице е физическо, не фирма) — вземаме
+    // първото "CONFORMED NAME:" след label-а, независимо кой от двата под-блока се появи.
+    private static string? ExtractHeaderName(string raw, string label)
+    {
+        var labelIndex = raw.IndexOf(label, StringComparison.OrdinalIgnoreCase);
+        if (labelIndex < 0)
+        {
+            return null;
+        }
+
+        var nameMatch = Regex.Match(raw[labelIndex..], @"CONFORMED NAME:\s*(?<name>[^\r\n]+)", RegexOptions.IgnoreCase);
+        return nameMatch.Success ? nameMatch.Groups["name"].Value.Trim() : null;
+    }
+
+    private sealed record SecEdgar13DGFilingRef(string IndexUrl, string FormType);
+
+    private sealed record SecEdgar13DGFiling(string IssuerName, string FilerName, decimal? PercentAcquired, DateTime FiledDate, string FormType);
 }

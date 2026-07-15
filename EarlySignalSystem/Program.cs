@@ -24,6 +24,8 @@ builder.Services.AddScoped<AppDbContext>(sp =>
 builder.Services.AddHttpClient();
 builder.Services.AddHttpClient<IDataCollectorService, DataCollectorService>();
 builder.Services.AddHttpClient<IAiAnalyzerService, AiAnalyzerService>();
+builder.Services.AddHttpClient<IStockPriceService, StockPriceService>();
+builder.Services.AddHttpClient<IOverboughtOversoldService, OverboughtOversoldService>();
 builder.Services.AddScoped<ICumulativeScoringService, CumulativeScoringService>();
 
 builder.Services.AddHangfire(config => config
@@ -65,14 +67,18 @@ app.MapPost("/api/scan-now", (IBackgroundJobClient backgroundJobs) =>
         s => s.CollectEurLexSignalsAsync(CancellationToken.None));
     var secEdgarJobId = backgroundJobs.ContinueJobWith<IDataCollectorService>(
         eurLexJobId, s => s.CollectSecEdgarSignalsAsync(CancellationToken.None));
+    var secEdgar13DGJobId = backgroundJobs.ContinueJobWith<IDataCollectorService>(
+        secEdgarJobId, s => s.CollectSecEdgar13DGSignalsAsync(CancellationToken.None));
     var tedJobId = backgroundJobs.ContinueJobWith<IDataCollectorService>(
-        secEdgarJobId, s => s.CollectTedSignalsAsync(CancellationToken.None));
+        secEdgar13DGJobId, s => s.CollectTedSignalsAsync(CancellationToken.None));
     var esmaJobId = backgroundJobs.ContinueJobWith<IDataCollectorService>(
         tedJobId, s => s.CollectEsmaSignalsAsync(CancellationToken.None));
     var analyzerJobId = backgroundJobs.ContinueJobWith<IAiAnalyzerService>(
         esmaJobId, s => s.AnalyzeSignalsAsync(CancellationToken.None));
-    backgroundJobs.ContinueJobWith<ICumulativeScoringService>(
+    var scorerJobId = backgroundJobs.ContinueJobWith<ICumulativeScoringService>(
         analyzerJobId, s => s.CalculateScoresAsync(CancellationToken.None));
+    backgroundJobs.ContinueJobWith<IOverboughtOversoldService>(
+        scorerJobId, s => s.AssessTopCompaniesAsync(CancellationToken.None));
 
     RecurringJobScheduler.SkipTodayAndRescheduleForTomorrow();
 

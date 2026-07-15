@@ -7,4 +7,5 @@ public interface IDataCollectorService
     Task<int> CollectTedSignalsAsync(CancellationToken cancellationToken = default);
     Task<int> CollectOecdSignalsAsync(CancellationToken cancellationToken = default);
     Task<int> CollectEsmaSignalsAsync(CancellationToken cancellationToken = default);
+    Task<int> CollectSecEdgar13DGSignalsAsync(CancellationToken cancellationToken = default);
 }

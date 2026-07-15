@@ -17,6 +17,11 @@ public static class RecurringJobScheduler
             "10 18 * * *");
 
         RecurringJob.AddOrUpdate<IDataCollectorService>(
+            "sec-edgar-13dg-collector",
+            service => service.CollectSecEdgar13DGSignalsAsync(CancellationToken.None),
+            "12 18 * * *");
+
+        RecurringJob.AddOrUpdate<IDataCollectorService>(
             "ted-collector",
             service => service.CollectTedSignalsAsync(CancellationToken.None),
             "15 18 * * *");
@@ -39,6 +44,11 @@ public static class RecurringJobScheduler
             "cumulative-scorer",
             service => service.CalculateScoresAsync(CancellationToken.None),
             "0 19 * * *");
+
+        RecurringJob.AddOrUpdate<IOverboughtOversoldService>(
+            "technical-assessor",
+            service => service.AssessTopCompaniesAsync(CancellationToken.None),
+            "15 19 * * *");
     }
 
     // "Scan Now" вече изпълни ръчно днешния цикъл — пренасрочваме всеки recurring job да гръмне
@@ -60,6 +70,11 @@ public static class RecurringJobScheduler
             $"10 18 {dayMonth} *");
 
         RecurringJob.AddOrUpdate<IDataCollectorService>(
+            "sec-edgar-13dg-collector",
+            service => service.CollectSecEdgar13DGSignalsAsync(CancellationToken.None),
+            $"12 18 {dayMonth} *");
+
+        RecurringJob.AddOrUpdate<IDataCollectorService>(
             "ted-collector",
             service => service.CollectTedSignalsAsync(CancellationToken.None),
             $"15 18 {dayMonth} *");
@@ -78,6 +93,11 @@ public static class RecurringJobScheduler
             "cumulative-scorer",
             service => service.CalculateScoresAsync(CancellationToken.None),
             $"0 19 {dayMonth} *");
+
+        RecurringJob.AddOrUpdate<IOverboughtOversoldService>(
+            "technical-assessor",
+            service => service.AssessTopCompaniesAsync(CancellationToken.None),
+            $"15 19 {dayMonth} *");
 
         var restoreAt = tomorrow.AddHours(20);
         BackgroundJob.Schedule(() => RestoreDailySchedule(), restoreAt - DateTime.Now);

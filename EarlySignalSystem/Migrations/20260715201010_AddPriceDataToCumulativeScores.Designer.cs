@@ -4,6 +4,7 @@ using EarlySignalSystem.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -11,9 +12,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace EarlySignalSystem.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260715201010_AddPriceDataToCumulativeScores")]
+    partial class AddPriceDataToCumulativeScores
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -318,41 +321,6 @@ namespace EarlySignalSystem.Migrations
                     b.HasIndex("RunLogId");
 
                     b.ToTable("Signals");
-                });
-
-            modelBuilder.Entity("EarlySignalSystem.Models.TechnicalAssessment", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("int");
-
-                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
-
-                    b.Property<DateTime>("AssessedAt")
-                        .HasColumnType("datetime2");
-
-                    b.Property<string>("Assessment")
-                        .IsRequired()
-                        .HasColumnType("nvarchar(max)");
-
-                    b.Property<decimal?>("MACDSignal")
-                        .HasPrecision(9, 4)
-                        .HasColumnType("decimal(9,4)");
-
-                    b.Property<decimal?>("RSI")
-                        .HasPrecision(9, 4)
-                        .HasColumnType("decimal(9,4)");
-
-                    b.Property<string>("Reason")
-                        .HasColumnType("nvarchar(max)");
-
-                    b.Property<string>("Ticker")
-                        .IsRequired()
-                        .HasColumnType("nvarchar(max)");
-
-                    b.HasKey("Id");
-
-                    b.ToTable("TechnicalAssessments");
                 });
 
             modelBuilder.Entity("EarlySignalSystem.Models.CompanyPick", b =>

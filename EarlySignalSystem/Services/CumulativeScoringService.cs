@@ -19,11 +19,13 @@ public class CumulativeScoringService : ICumulativeScoringService
     private const string JobName = "Cumulative-Scorer";
 
     private readonly AppDbContext _dbContext;
+    private readonly IStockPriceService _stockPriceService;
     private readonly ILogger<CumulativeScoringService> _logger;
 
-    public CumulativeScoringService(AppDbContext dbContext, ILogger<CumulativeScoringService> logger)
+    public CumulativeScoringService(AppDbContext dbContext, IStockPriceService stockPriceService, ILogger<CumulativeScoringService> logger)
     {
         _dbContext = dbContext;
+        _stockPriceService = stockPriceService;
         _logger = logger;
     }
 
@@ -75,6 +77,10 @@ public class CumulativeScoringService : ICumulativeScoringService
         // Пазим последния (по PickedAt) CompanyPick на всяка компания, за да вземем Sentiment/Rationale
         // за ShortlistSnapshot по-долу — CumulativeScore не съхранява тези полета.
         var latestPickByCompany = new Dictionary<CumulativeScore, CompanyPick>();
+
+        // Пазим и всички CompanyPicks на компанията (не само последния), за да намерим FirstSignalDate
+        // през CompanyPickSignals -> Signals при ценовото обогатяване на топ 5 по-долу.
+        var allPicksByCompany = new Dictionary<CumulativeScore, List<CompanyPick>>();
 
         foreach (var group in picks.GroupBy(p => new { p.CompanyName, p.Ticker }))
         {
@@ -138,6 +144,19 @@ public class CumulativeScoringService : ICumulativeScoringService
 
             scores.Add(score);
             latestPickByCompany[score] = latestPick;
+            allPicksByCompany[score] = companyPicks;
+        }
+
+        // Ценовото обогатяване (Alpha Vantage) е скъпо (free tier: 25 заявки/ден) — правим го само за
+        // топ 5 по Score, не за всичките ~66 компании, преди да презапишем таблицата.
+        var topForPriceEnrichment = scores
+            .OrderByDescending(s => s.Score)
+            .Take(TopShortlistSize)
+            .ToList();
+
+        foreach (var score in topForPriceEnrichment)
+        {
+            await EnrichWithPriceDataAsync(score, allPicksByCompany[score], now, cancellationToken);
         }
 
         // CumulativeScores е "текущо състояние" на shortlist-а, не исторически лог — всяко изчисление презаписва изцяло.
@@ -150,6 +169,47 @@ public class CumulativeScoringService : ICumulativeScoringService
         await SaveShortlistSnapshotAsync(scores, latestPickByCompany, now, cancellationToken);
 
         return scores.Count;
+    }
+
+    private async Task EnrichWithPriceDataAsync(CumulativeScore score, List<CompanyPick> companyPicks, DateTime now, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var pickIds = companyPicks.Select(p => p.Id).ToList();
+
+            var signalIds = await _dbContext.CompanyPickSignals
+                .Where(cps => pickIds.Contains(cps.CompanyPickId))
+                .Select(cps => cps.SignalId)
+                .Distinct()
+                .ToListAsync(cancellationToken);
+
+            var firstSignalDate = signalIds.Count == 0
+                ? (DateTime?)null
+                : await _dbContext.Signals
+                    .Where(s => signalIds.Contains(s.Id))
+                    .MinAsync(s => (DateTime?)s.PublishedAt, cancellationToken);
+
+            score.FirstSignalDate = firstSignalDate;
+
+            var priceOnFirstSignalDate = firstSignalDate.HasValue
+                ? await _stockPriceService.GetClosingPriceAsync(score.Ticker, firstSignalDate.Value, cancellationToken)
+                : null;
+            score.PriceOnFirstSignalDate = priceOnFirstSignalDate;
+
+            var latestPrice = await _stockPriceService.GetLatestPriceAsync(score.Ticker, cancellationToken);
+            score.LatestPrice = latestPrice;
+            score.LatestPriceDate = latestPrice.HasValue ? now.Date : null;
+
+            score.PriceChangePercent = priceOnFirstSignalDate is > 0 && latestPrice.HasValue
+                ? (latestPrice.Value - priceOnFirstSignalDate.Value) / priceOnFirstSignalDate.Value * 100m
+                : null;
+        }
+        catch (Exception ex)
+        {
+            // Alpha Vantage грешка (rate limit, невалиден symbol, мрежов проблем) за една компания не бива
+            // да проваля целия scoring run — оставяме ценовите полета null и продължаваме.
+            _logger.LogWarning(ex, "Failed to enrich price data for {Ticker}", score.Ticker);
+        }
     }
 
     private async Task SaveShortlistSnapshotAsync(

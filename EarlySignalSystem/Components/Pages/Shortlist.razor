@@ -52,6 +52,12 @@
                                     {
                                         <MudChip T="string" Color="@GetSentimentColor(entry.LatestSentiment)" Variant="Variant.Filled" Size="Size.Small">@GetSentimentLabel(entry.LatestSentiment)</MudChip>
                                     }
+                                    @if (entry.Assessment is not null)
+                                    {
+                                        <MudTooltip Text="@entry.Assessment.Reason">
+                                            <MudChip T="string" Color="@GetAssessmentColor(entry.Assessment.Assessment)" Variant="Variant.Filled" Size="Size.Small">@GetAssessmentLabel(entry.Assessment.Assessment)</MudChip>
+                                        </MudTooltip>
+                                    }
                                     <MudText Typo="Typo.h4" Style="font-weight:700;" Color="@GetScoreColor(entry.Score.Score)">@entry.Score.Score.ToString("0.0")</MudText>
                                 </MudStack>
                             </MudStack>
@@ -61,6 +67,29 @@
                                 <MudChip T="string" Variant="Variant.Filled" Size="Size.Small" Color="@GetDiversityColor(entry.Score.SignalDiversity)">@GetDiversityLabel(entry.Score.SignalDiversity)</MudChip>
                                 <MudChip T="string" Variant="Variant.Filled" Size="Size.Small" Color="@GetVelocityColor(entry.Score.VelocityLevel)">@GetVelocityLabel(entry.Score.VelocityLevel)</MudChip>
                             </MudStack>
+
+                            @if (entry.Score.PriceOnFirstSignalDate is not null)
+                            {
+                                <MudStack Spacing="0" Class="mt-3">
+                                    <MudText Typo="Typo.body2" Class="mud-text-secondary">
+                                        First signal: @entry.Score.FirstSignalDate?.ToString("dd MMM yyyy") @@ $@entry.Score.PriceOnFirstSignalDate?.ToString("F2")
+                                    </MudText>
+                                    @if (entry.Score.LatestPrice is not null)
+                                    {
+                                        <MudStack Row="true" Spacing="2" AlignItems="AlignItems.Baseline">
+                                            <MudText Typo="Typo.body2" Class="mud-text-secondary">
+                                                Latest: $@entry.Score.LatestPrice?.ToString("F2") (@entry.Score.LatestPriceDate?.ToString("dd MMM yyyy"))
+                                            </MudText>
+                                            @if (entry.Score.PriceChangePercent is not null)
+                                            {
+                                                <MudText Typo="Typo.h6" Style="font-weight:700;" Color="@GetPriceChangeColor(entry.Score.PriceChangePercent.Value)">
+                                                    @GetPriceChangeArrow(entry.Score.PriceChangePercent.Value) @entry.Score.PriceChangePercent.Value.ToString("0.0")%
+                                                </MudText>
+                                            }
+                                        </MudStack>
+                                    }
+                                </MudStack>
+                            }
 
                             @if (!string.IsNullOrWhiteSpace(entry.LatestRationale))
                             {
@@ -132,6 +161,11 @@
             var latestRationale = picks.FirstOrDefault()?.Rationale;
             var latestSentiment = picks.FirstOrDefault()?.Sentiment;
 
+            var assessment = await dbContext.TechnicalAssessments
+                .Where(t => t.Ticker == score.Ticker)
+                .OrderByDescending(t => t.AssessedAt)
+                .FirstOrDefaultAsync();
+
             var pickIds = picks.Select(p => p.Id).ToList();
             var signalIds = pickIds.Count == 0
                 ? new List<int>()
@@ -148,7 +182,7 @@
                     .OrderByDescending(s => s.PublishedAt)
                     .ToListAsync();
 
-            entries.Add(new ShortlistEntry(score, latestRationale, latestSentiment, signals));
+            entries.Add(new ShortlistEntry(score, latestRationale, latestSentiment, signals, assessment));
         }
 
         _entries = entries;
@@ -210,5 +244,33 @@
         _ => "→ Neutral",
     };
 
-    private sealed record ShortlistEntry(CumulativeScore Score, string? LatestRationale, string? LatestSentiment, List<Signal> Signals);
+    private static Color GetAssessmentColor(string assessment) => assessment switch
+    {
+        "Overbought" => Color.Error,
+        "Oversold" => Color.Success,
+        _ => Color.Warning,
+    };
+
+    private static string GetAssessmentLabel(string assessment) => assessment switch
+    {
+        "Overbought" => "🔴 Overbought",
+        "Oversold" => "🟢 Oversold",
+        _ => "🟡 Neutral",
+    };
+
+    private static Color GetPriceChangeColor(decimal changePercent) => changePercent switch
+    {
+        > 0 => Color.Success,
+        < 0 => Color.Error,
+        _ => Color.Default,
+    };
+
+    private static string GetPriceChangeArrow(decimal changePercent) => changePercent switch
+    {
+        > 0 => "▲",
+        < 0 => "▼",
+        _ => "·",
+    };
+
+    private sealed record ShortlistEntry(CumulativeScore Score, string? LatestRationale, string? LatestSentiment, List<Signal> Signals, TechnicalAssessment? Assessment);
 }
