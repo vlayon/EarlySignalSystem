@@ -163,11 +163,7 @@
                 && r.JobName != null && new[] { "EUR-Lex", "SEC-EDGAR", "TED", "ESMA" }.Contains(r.JobName))
             .SumAsync(r => (int?)r.SignalsCollected) ?? 0;
 
-        _companiesAnalyzedToday = await dbContext.CompanyPicks
-            .Where(c => c.PickedAt >= today && c.PickedAt < today.AddDays(1))
-            .Select(c => new { c.Ticker, c.CompanyName })
-            .Distinct()
-            .CountAsync();
+        _companiesAnalyzedToday = latestRunLogs["Cumulative-Scorer"]?.SignalsCollected ?? 0;
 
         var latestScanKey = await dbContext.ShortlistSnapshots
             .OrderByDescending(s => s.ScanDate)
@@ -214,26 +210,55 @@
         {
             var dayRuns = runLogs.Where(r => r.StartedAt.Date == date).ToList();
 
+            var eurLexSignals = GetSignalsForJob(dayRuns, "EUR-Lex");
+            var tedSignals = GetSignalsForJob(dayRuns, "TED");
+            var secEdgarSignals = GetSignalsForJob(dayRuns, "SEC-EDGAR");
+            var aiAnalyzerSignals = GetSignalsForJob(dayRuns, "AI-Analyzer");
+
+            if (eurLexSignals is null && tedSignals is null && secEdgarSignals is null && aiAnalyzerSignals is null)
+            {
+                continue;
+            }
+
             var companies = picks.Where(p => p.PickedAt.Date == date)
                 .Select(p => new { p.Ticker, p.CompanyName })
                 .Distinct()
                 .Count();
 
-            var status = dayRuns.Count == 0
-                ? "No runs"
-                : dayRuns.Any(r => r.Status == "Failed") ? "Failed" : "Success";
-
             rows.Add(new ScanHistoryRow(
                 date,
-                GetSignalsForJob(dayRuns, "EUR-Lex"),
-                GetSignalsForJob(dayRuns, "TED"),
-                GetSignalsForJob(dayRuns, "SEC-EDGAR"),
-                GetSignalsForJob(dayRuns, "AI-Analyzer"),
+                eurLexSignals,
+                tedSignals,
+                secEdgarSignals,
+                aiAnalyzerSignals,
                 companies,
-                status));
+                GetScanStatus(dayRuns)));
         }
 
         _scanHistoryRows = rows;
+    }
+
+    private static readonly string[] ImportantJobs = ["EUR-Lex", "TED", "SEC-EDGAR", "AI-Analyzer"];
+    private static readonly string[] WarningOnlyJobs = ["ESMA", "OECD"];
+
+    private static string GetScanStatus(List<RunLog> dayRuns)
+    {
+        if (dayRuns.Count == 0)
+        {
+            return "No runs";
+        }
+
+        if (dayRuns.Any(r => ImportantJobs.Contains(r.JobName) && r.Status == "Failed"))
+        {
+            return "Failed";
+        }
+
+        if (dayRuns.Any(r => WarningOnlyJobs.Contains(r.JobName) && r.Status == "Failed"))
+        {
+            return "Warning";
+        }
+
+        return "Success";
     }
 
     private static int? GetSignalsForJob(List<RunLog> dayRuns, string jobName)
@@ -300,6 +325,7 @@
     private static Color GetHistoryStatusColor(string status) => status switch
     {
         "Success" => Color.Success,
+        "Warning" => Color.Warning,
         "Failed" => Color.Error,
         _ => Color.Default,
     };
