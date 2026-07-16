@@ -216,6 +216,11 @@ public class AiAnalyzerService : IAiAnalyzerService
         sb.AppendLine("Analyze these regulatory/legislative signals and identify companies with DIRECT and SPECIFIC business impact.");
         sb.AppendLine("Only include a company if: (1) the regulation directly targets its industry/product category, (2) the company has a concrete competitive advantage from this specific regulation, (3) you can explain in 2 sentences exactly HOW the regulation affects THIS company's revenue or market position.");
         sb.AppendLine("DO NOT include companies based on: general sector exposure, country of domicile, or indirect/speculative connections.");
+        sb.AppendLine("Return ONLY real, publicly listed companies that trade on a major stock exchange (NYSE, NASDAQ, London Stock Exchange, Euronext, XETRA/Frankfurt, Borsa Italiana, Madrid Stock Exchange).");
+        sb.AppendLine("Do NOT return: industry categories, government agencies, subsidiaries of private companies, consortiums, or any entity without a publicly traded stock.");
+        sb.AppendLine("Do NOT return descriptions like \"X or similar companies\" or \"companies that provide Y\".");
+        sb.AppendLine("If you cannot identify a specific publicly listed company directly affected, skip it entirely — return fewer companies rather than inventing ones.");
+        sb.AppendLine("Maximum 5 companies per batch, only if you are certain they are publicly listed.");
         sb.AppendLine("For each company, the rationale MUST follow this format: \"[Specific regulation/signal] directly affects [company] because [specific business reason]. Unlike competitors, [company] is better positioned because [concrete differentiator].\"");
         sb.AppendLine("Each signal below is prefixed with its reference ID, e.g. \"[ID:123]\". For each company, \"signalCelexIds\" MUST list the exact reference ID(s) (as strings) of the signal(s) below that this pick is based on.");
         sb.AppendLine("Each company MUST also include a \"sentiment\" field, one of exactly: \"Bullish\" (the company is expected to benefit from the signal), \"Bearish\" (expected to lose or be threatened by it), or \"Neutral\" (affected, but the direction is unclear). This field is required, never omit it.");
