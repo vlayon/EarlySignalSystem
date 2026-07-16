@@ -17,6 +17,7 @@ public class AppDbContext : DbContext
     public DbSet<CompanyPickSignal> CompanyPickSignals => Set<CompanyPickSignal>();
     public DbSet<ShortlistSnapshot> ShortlistSnapshots => Set<ShortlistSnapshot>();
     public DbSet<TechnicalAssessment> TechnicalAssessments => Set<TechnicalAssessment>();
+    public DbSet<Company> Companies => Set<Company>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -85,5 +86,11 @@ public class AppDbContext : DbContext
             .WithMany()
             .HasForeignKey(cps => cps.SignalId)
             .OnDelete(DeleteBehavior.Cascade);
+
+        // LocalDB default collation (SQL_Latin1_General_CP1_CI_AS) е case-insensitive, затова обикновен
+        // unique index върху CompanyName е достатъчен за case-insensitive уникалност без explicit collation.
+        modelBuilder.Entity<Company>()
+            .HasIndex(c => c.CompanyName)
+            .IsUnique();
     }
 }

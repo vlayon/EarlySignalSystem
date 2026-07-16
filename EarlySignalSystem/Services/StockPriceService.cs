@@ -19,6 +19,10 @@ public class StockPriceService : IStockPriceService
     // за да пестим free tier бюджета (25 заявки/ден).
     private readonly Dictionary<string, IReadOnlyDictionary<DateTime, decimal>?> _seriesCache = new(StringComparer.OrdinalIgnoreCase);
 
+    // true след първата реално изпратена Alpha Vantage заявка в текущия service instance — закъснението
+    // за rate limiting пада само между отделни HTTP заявки, не и преди самата първа.
+    private bool _hasMadeRequest;
+
     public StockPriceService(HttpClient httpClient, IConfiguration configuration, ILogger<StockPriceService> logger)
     {
         _httpClient = httpClient;
@@ -26,7 +30,7 @@ public class StockPriceService : IStockPriceService
         _logger = logger;
     }
 
-    public async Task<decimal?> GetClosingPriceAsync(string ticker, DateTime date, CancellationToken cancellationToken = default)
+    public async Task<decimal?> GetClosingPriceAsync(string? ticker, DateTime date, CancellationToken cancellationToken = default)
     {
         var series = await GetSeriesAsync(ticker, cancellationToken);
         if (series is null || series.Count == 0)
@@ -45,7 +49,7 @@ public class StockPriceService : IStockPriceService
         return null;
     }
 
-    public async Task<decimal?> GetLatestPriceAsync(string ticker, CancellationToken cancellationToken = default)
+    public async Task<decimal?> GetLatestPriceAsync(string? ticker, CancellationToken cancellationToken = default)
     {
         var series = await GetSeriesAsync(ticker, cancellationToken);
         if (series is null || series.Count == 0)
@@ -56,8 +60,15 @@ public class StockPriceService : IStockPriceService
         return series[series.Keys.Max()];
     }
 
-    private async Task<IReadOnlyDictionary<DateTime, decimal>?> GetSeriesAsync(string ticker, CancellationToken cancellationToken)
+    private async Task<IReadOnlyDictionary<DateTime, decimal>?> GetSeriesAsync(string? ticker, CancellationToken cancellationToken)
     {
+        // Компанията още няма верифициран ticker (Companies.TickerVerified = false) — пропускаме price
+        // lookup-а тихо, това е нормално/очаквано състояние, не грешка.
+        if (string.IsNullOrWhiteSpace(ticker))
+        {
+            return null;
+        }
+
         if (_seriesCache.TryGetValue(ticker, out var cached))
         {
             return cached;
@@ -71,6 +82,12 @@ public class StockPriceService : IStockPriceService
 
         try
         {
+            if (_hasMadeRequest)
+            {
+                await Task.Delay(1500, cancellationToken);
+            }
+            _hasMadeRequest = true;
+
             var url = string.Format(DailySeriesApiUrl, Uri.EscapeDataString(ticker), apiKey);
             using var response = await _httpClient.GetAsync(url, cancellationToken);
             response.EnsureSuccessStatusCode();

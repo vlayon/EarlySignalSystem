@@ -49,6 +49,11 @@ public static class RecurringJobScheduler
             "technical-assessor",
             service => service.AssessTopCompaniesAsync(CancellationToken.None),
             "15 19 * * *");
+
+        RecurringJob.AddOrUpdate<ITickerVerificationService>(
+            "ticker-verifier",
+            service => service.VerifyPendingTickersAsync(CancellationToken.None),
+            "0 20 * * *");
     }
 
     // "Scan Now" вече изпълни ръчно днешния цикъл — пренасрочваме всеки recurring job да гръмне
@@ -98,6 +103,11 @@ public static class RecurringJobScheduler
             "technical-assessor",
             service => service.AssessTopCompaniesAsync(CancellationToken.None),
             $"15 19 {dayMonth} *");
+
+        RecurringJob.AddOrUpdate<ITickerVerificationService>(
+            "ticker-verifier",
+            service => service.VerifyPendingTickersAsync(CancellationToken.None),
+            $"0 20 {dayMonth} *");
 
         var restoreAt = tomorrow.AddHours(20);
         BackgroundJob.Schedule(() => RestoreDailySchedule(), restoreAt - DateTime.Now);

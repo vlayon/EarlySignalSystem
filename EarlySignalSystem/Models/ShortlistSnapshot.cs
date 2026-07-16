@@ -6,7 +6,7 @@ public class ShortlistSnapshot
     public DateTime ScanDate { get; set; }
     public int ScanNumber { get; set; }
     public int CompanyRank { get; set; }
-    public string Ticker { get; set; } = string.Empty;
+    public string? Ticker { get; set; }
     public string CompanyName { get; set; } = string.Empty;
     public string? Sector { get; set; }
     public decimal CumulativeScore { get; set; }

@@ -70,6 +70,11 @@ public class AiAnalyzerService : IAiAnalyzerService
 
             var analyzedAt = DateTime.UtcNow;
 
+            // Companies със същото име могат да се появят повторно в един и същ AI batch — кешираме
+            // резолвнатите/новосъздадените Company записи по име, за да не удряме DB за всеки company pick
+            // и да не се опитаме да вкараме дублиран ред (нарушение на unique index-а по CompanyName).
+            var companyCache = new Dictionary<string, Company>(StringComparer.OrdinalIgnoreCase);
+
             foreach (var sector in analysis.Sectors)
             {
                 _dbContext.SectorScores.Add(new SectorScore
@@ -86,9 +91,11 @@ public class AiAnalyzerService : IAiAnalyzerService
 
             foreach (var company in analysis.Companies)
             {
+                var resolvedCompany = await ResolveCompanyAsync(company.CompanyName, companyCache, cancellationToken);
+
                 var companyPick = new CompanyPick
                 {
-                    Ticker = company.Ticker,
+                    Ticker = resolvedCompany.Ticker,
                     CompanyName = company.CompanyName,
                     Sector = company.Sector,
                     ConfidenceScore = company.Score,
@@ -169,6 +176,40 @@ public class AiAnalyzerService : IAiAnalyzerService
         return ParseAnalysis(text);
     }
 
+    // Търси Company по partial, case-insensitive match на името (AI-ят и Companies таблицата рядко се
+    // договарят за идентична форма на името, напр. "BMW" срещу "Bayerische Motoren Werke AG").
+    // Ако не намери нищо, създава нов Company запис с Ticker = null — ще се резолвне по-късно от
+    // TickerVerificationService.
+    private async Task<Company> ResolveCompanyAsync(string companyName, Dictionary<string, Company> companyCache, CancellationToken cancellationToken)
+    {
+        if (companyCache.TryGetValue(companyName, out var cached))
+        {
+            return cached;
+        }
+
+        var existing = await _dbContext.Companies
+            .FirstOrDefaultAsync(c => c.CompanyName.Contains(companyName) || companyName.Contains(c.CompanyName), cancellationToken);
+
+        if (existing is not null)
+        {
+            companyCache[companyName] = existing;
+            return existing;
+        }
+
+        var newCompany = new Company
+        {
+            CompanyName = companyName,
+            TickerVerified = false,
+            CreatedAt = DateTime.UtcNow,
+            IsActive = true
+        };
+        _dbContext.Companies.Add(newCompany);
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
+        companyCache[companyName] = newCompany;
+        return newCompany;
+    }
+
     private static string BuildPrompt(Signal[] batch)
     {
         var sb = new StringBuilder();
@@ -178,8 +219,9 @@ public class AiAnalyzerService : IAiAnalyzerService
         sb.AppendLine("For each company, the rationale MUST follow this format: \"[Specific regulation/signal] directly affects [company] because [specific business reason]. Unlike competitors, [company] is better positioned because [concrete differentiator].\"");
         sb.AppendLine("Each signal below is prefixed with its reference ID, e.g. \"[ID:123]\". For each company, \"signalCelexIds\" MUST list the exact reference ID(s) (as strings) of the signal(s) below that this pick is based on.");
         sb.AppendLine("Each company MUST also include a \"sentiment\" field, one of exactly: \"Bullish\" (the company is expected to benefit from the signal), \"Bearish\" (expected to lose or be threatened by it), or \"Neutral\" (affected, but the direction is unclear). This field is required, never omit it.");
+        sb.AppendLine("Do NOT include a ticker symbol — company tickers are resolved separately after analysis.");
         sb.AppendLine("Return strict JSON only, no preamble, matching this exact structure:");
-        sb.AppendLine("{ \"sectors\": [ { \"sector\": \"string\", \"score\": 0-100, \"trend\": \"Rising|Stable|Falling\", \"rationale\": \"string\" } ], \"companies\": [ { \"ticker\": \"string\", \"companyName\": \"string\", \"sector\": \"string\", \"score\": 0-100, \"rationale\": \"string\", \"sentiment\": \"Bullish|Bearish|Neutral\", \"signalCelexIds\": [\"string\"] } ] }");
+        sb.AppendLine("{ \"sectors\": [ { \"sector\": \"string\", \"score\": 0-100, \"trend\": \"Rising|Stable|Falling\", \"rationale\": \"string\" } ], \"companies\": [ { \"companyName\": \"string\", \"sector\": \"string\", \"score\": 0-100, \"rationale\": \"string\", \"sentiment\": \"Bullish|Bearish|Neutral\", \"signalCelexIds\": [\"string\"] } ] }");
         sb.AppendLine();
         sb.AppendLine("Signals:");
         foreach (var signal in batch)
@@ -255,7 +297,6 @@ public class AiAnalyzerService : IAiAnalyzerService
 
     private sealed class CompanyAnalysis
     {
-        public string Ticker { get; set; } = string.Empty;
         public string CompanyName { get; set; } = string.Empty;
         public string Sector { get; set; } = string.Empty;
         public decimal Score { get; set; }

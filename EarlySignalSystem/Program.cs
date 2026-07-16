@@ -26,6 +26,7 @@ builder.Services.AddHttpClient<IDataCollectorService, DataCollectorService>();
 builder.Services.AddHttpClient<IAiAnalyzerService, AiAnalyzerService>();
 builder.Services.AddHttpClient<IStockPriceService, StockPriceService>();
 builder.Services.AddHttpClient<IOverboughtOversoldService, OverboughtOversoldService>();
+builder.Services.AddHttpClient<ITickerVerificationService, TickerVerificationService>();
 builder.Services.AddScoped<ICumulativeScoringService, CumulativeScoringService>();
 
 builder.Services.AddHangfire(config => config
@@ -77,8 +78,10 @@ app.MapPost("/api/scan-now", (IBackgroundJobClient backgroundJobs) =>
         esmaJobId, s => s.AnalyzeSignalsAsync(CancellationToken.None));
     var scorerJobId = backgroundJobs.ContinueJobWith<ICumulativeScoringService>(
         analyzerJobId, s => s.CalculateScoresAsync(CancellationToken.None));
-    backgroundJobs.ContinueJobWith<IOverboughtOversoldService>(
+    var technicalJobId = backgroundJobs.ContinueJobWith<IOverboughtOversoldService>(
         scorerJobId, s => s.AssessTopCompaniesAsync(CancellationToken.None));
+    backgroundJobs.ContinueJobWith<ITickerVerificationService>(
+        technicalJobId, s => s.VerifyPendingTickersAsync(CancellationToken.None));
 
     RecurringJobScheduler.SkipTodayAndRescheduleForTomorrow();
 
