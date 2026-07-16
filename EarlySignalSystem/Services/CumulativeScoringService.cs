@@ -8,13 +8,15 @@ public class CumulativeScoringService : ICumulativeScoringService
 {
     private const int LookbackDays = 14;
     private const int VelocityWindowDays = 7;
-    private const decimal SignalCountWeight = 5m;
-    private const decimal SignalDiversityWeight = 10m;
-    private const decimal HighVelocityBonus = 15m;
+    private const decimal DiversityPointsWeight = 20m;
+    private const decimal CountPointsWeight = 3m;
+    private const decimal HighVelocityBonus = 10m;
     private const decimal MediumVelocityBonus = 5m;
     private const int HighVelocityThreshold = 3;
     private const int MediumVelocityThreshold = 1;
-    private const int MinSignalCountForInclusion = 2;
+    // Raw Score = BaseScore(0-100) + DiversityPoints + CountPoints + VelocityBonus; нормализираме до 100
+    // спрямо теоретичния максимум на Raw Score, за да не клампва тихо всеки силен сигнал на 100.
+    private const decimal MaxPossibleRawScore = 230m;
     private const int TopShortlistSize = 5;
     private const string JobName = "Cumulative-Scorer";
 
@@ -82,22 +84,13 @@ public class CumulativeScoringService : ICumulativeScoringService
         var latestPickByCompany = new Dictionary<CumulativeScore, CompanyPick>();
 
         // Пазим и всички CompanyPicks на компанията (не само последния), за да намерим FirstSignalDate
-        // през CompanyPickSignals -> Signals при ценовото обогатяване на топ 5 по-долу.
+        // през CompanyPickSignals -> Signals за всяка компания по-долу.
         var allPicksByCompany = new Dictionary<CumulativeScore, List<CompanyPick>>();
 
         foreach (var group in picks.GroupBy(p => new { p.CompanyName, p.Ticker }))
         {
             var companyPicks = group.ToList();
             var signalCount = companyPicks.Count;
-
-            // Компания с 1 сигнал е noise, не достатъчно потвърден сигнал — изключваме я от shortlist-а.
-            if (signalCount < MinSignalCountForInclusion)
-            {
-                continue;
-            }
-
-            var baseScore = companyPicks.Average(p => p.ConfidenceScore);
-            var velocity = companyPicks.Count(p => p.PickedAt >= velocityStart);
 
             var runLogIds = companyPicks
                 .Where(p => p.RunLogId.HasValue)
@@ -106,7 +99,8 @@ public class CumulativeScoringService : ICumulativeScoringService
                 .ToList();
 
             // Signal Diversity се измерва през RunLog: сигналите нямат директна връзка към конкретна компания,
-            // но всеки CompanyPick знае от кой analysis run е произлязъл.
+            // но всеки CompanyPick знае от кой analysis run е произлязъл. Изчисляваме го преди inclusion filter-а
+            // по-долу, защото решението за включване вече зависи от diversity, не само от count.
             var signalDiversity = runLogIds.Count == 0
                 ? 0
                 : await _dbContext.Signals
@@ -114,6 +108,17 @@ public class CumulativeScoringService : ICumulativeScoringService
                     .Select(s => s.SignalType)
                     .Distinct()
                     .CountAsync(cancellationToken);
+
+            // Компания с diversity 1 и само 1 сигнал е noise — изключваме я. Diversity >= 2 винаги минава
+            // (потвърдено от повече от един тип източник), diversity 1 изисква поне 2 picks.
+            var isEligible = signalDiversity >= 2 || (signalDiversity == 1 && signalCount >= 2);
+            if (!isEligible)
+            {
+                continue;
+            }
+
+            var baseScore = companyPicks.Average(p => p.ConfidenceScore);
+            var velocity = companyPicks.Count(p => p.PickedAt >= velocityStart);
 
             var velocityBonus = velocity > HighVelocityThreshold
                 ? HighVelocityBonus
@@ -127,7 +132,10 @@ public class CumulativeScoringService : ICumulativeScoringService
                     ? VelocityLevel.Medium
                     : VelocityLevel.Low;
 
-            var rawScore = baseScore + (signalCount * SignalCountWeight) + (signalDiversity * SignalDiversityWeight) + velocityBonus;
+            var diversityPoints = signalDiversity * DiversityPointsWeight;
+            var countPoints = signalCount * CountPointsWeight;
+            var rawScore = baseScore + diversityPoints + countPoints + velocityBonus;
+            var normalizedScore = rawScore / MaxPossibleRawScore * 100m;
 
             var latestPick = companyPicks
                 .OrderByDescending(p => p.PickedAt)
@@ -138,7 +146,7 @@ public class CumulativeScoringService : ICumulativeScoringService
                 Ticker = group.Key.Ticker,
                 CompanyName = group.Key.CompanyName,
                 Sector = latestPick.Sector,
-                Score = Math.Clamp(rawScore, 0m, 100m),
+                Score = Math.Clamp(normalizedScore, 0m, 100m),
                 SignalCount = signalCount,
                 SignalDiversity = signalDiversity,
                 VelocityLevel = velocityLevel,
@@ -150,6 +158,13 @@ public class CumulativeScoringService : ICumulativeScoringService
             allPicksByCompany[score] = companyPicks;
         }
 
+        // FirstSignalDate трябва да е известен за ВСИЧКИ компании, не само топ 5 — участва като tie-breaker
+        // в ordering-а за Shortlist snapshot-а по-долу. Това е чиста DB заявка (без Alpha Vantage), евтино е.
+        foreach (var score in scores)
+        {
+            score.FirstSignalDate = await GetFirstSignalDateAsync(allPicksByCompany[score], cancellationToken);
+        }
+
         // Ценовото обогатяване (Alpha Vantage) е скъпо (free tier: 25 заявки/ден) — правим го само за
         // топ 5 по Score, не за всичките ~66 компании, преди да презапишем таблицата.
         var topForPriceEnrichment = scores
@@ -159,7 +174,7 @@ public class CumulativeScoringService : ICumulativeScoringService
 
         foreach (var score in topForPriceEnrichment)
         {
-            await EnrichWithPriceDataAsync(score, allPicksByCompany[score], now, cancellationToken);
+            await EnrichWithPriceDataAsync(score, now, cancellationToken);
         }
 
         // CumulativeScores е "текущо състояние" на shortlist-а, не исторически лог — всяко изчисление презаписва изцяло.
@@ -175,28 +190,29 @@ public class CumulativeScoringService : ICumulativeScoringService
         return scores.Count;
     }
 
-    private async Task EnrichWithPriceDataAsync(CumulativeScore score, List<CompanyPick> companyPicks, DateTime now, CancellationToken cancellationToken)
+    private async Task<DateTime?> GetFirstSignalDateAsync(List<CompanyPick> companyPicks, CancellationToken cancellationToken)
+    {
+        var pickIds = companyPicks.Select(p => p.Id).ToList();
+
+        var signalIds = await _dbContext.CompanyPickSignals
+            .Where(cps => pickIds.Contains(cps.CompanyPickId))
+            .Select(cps => cps.SignalId)
+            .Distinct()
+            .ToListAsync(cancellationToken);
+
+        return signalIds.Count == 0
+            ? null
+            : await _dbContext.Signals
+                .Where(s => signalIds.Contains(s.Id))
+                .MinAsync(s => (DateTime?)s.PublishedAt, cancellationToken);
+    }
+
+    private async Task EnrichWithPriceDataAsync(CumulativeScore score, DateTime now, CancellationToken cancellationToken)
     {
         try
         {
-            var pickIds = companyPicks.Select(p => p.Id).ToList();
-
-            var signalIds = await _dbContext.CompanyPickSignals
-                .Where(cps => pickIds.Contains(cps.CompanyPickId))
-                .Select(cps => cps.SignalId)
-                .Distinct()
-                .ToListAsync(cancellationToken);
-
-            var firstSignalDate = signalIds.Count == 0
-                ? (DateTime?)null
-                : await _dbContext.Signals
-                    .Where(s => signalIds.Contains(s.Id))
-                    .MinAsync(s => (DateTime?)s.PublishedAt, cancellationToken);
-
-            score.FirstSignalDate = firstSignalDate;
-
-            var priceOnFirstSignalDate = firstSignalDate.HasValue
-                ? await _stockPriceService.GetClosingPriceAsync(score.Ticker, firstSignalDate.Value, cancellationToken)
+            var priceOnFirstSignalDate = score.FirstSignalDate.HasValue
+                ? await _stockPriceService.GetClosingPriceAsync(score.Ticker, score.FirstSignalDate.Value, cancellationToken)
                 : null;
             score.PriceOnFirstSignalDate = priceOnFirstSignalDate;
 
@@ -223,7 +239,9 @@ public class CumulativeScoringService : ICumulativeScoringService
         CancellationToken cancellationToken)
     {
         var top5 = scores
-            .OrderByDescending(s => s.Score)
+            .OrderByDescending(s => s.SignalDiversity)
+            .ThenByDescending(s => s.SignalCount)
+            .ThenByDescending(s => s.FirstSignalDate)
             .Take(TopShortlistSize)
             .ToList();
 
