@@ -1,8 +1,10 @@
 @rendermode InteractiveServer
 @using MudBlazor
 @using Microsoft.Extensions.Http
+@using System.Net
 @inject IHttpClientFactory HttpClientFactory
 @inject NavigationManager NavigationManager
+@inject ISnackbar Snackbar
 
 <div class="top-row ps-3 navbar navbar-dark">
     <div class="container-fluid">
@@ -47,26 +49,29 @@
         <div class="nav-item px-3 mt-3">
             <MudButton Variant="Variant.Filled"
                        Color="Color.Primary"
-                       StartIcon="@Icons.Material.Filled.PlayArrow"
                        FullWidth="true"
-                       Disabled="_scanning"
+                       Disabled="_scanInProgress"
                        OnClick="RunScanNowAsync">
-                @(_scanning ? "Scanning..." : "Scan Now")
+                @if (_scanInProgress)
+                {
+                    <MudProgressCircular Size="Size.Small" Indeterminate="true" Class="me-2" />
+                }
+                else
+                {
+                    <MudIcon Icon="@Icons.Material.Filled.PlayArrow" Size="Size.Small" Class="me-2" />
+                }
+                @(_scanInProgress ? "Scanning..." : "Scan Now")
             </MudButton>
-            @if (_scanning)
-            {
-                <MudProgressLinear Color="Color.Primary" Indeterminate="true" Class="mt-2" />
-            }
         </div>
     </nav>
 </div>
 
 @code {
-    private bool _scanning;
+    private bool _scanInProgress;
 
     private async Task RunScanNowAsync()
     {
-        _scanning = true;
+        _scanInProgress = true;
         StateHasChanged();
 
         try
@@ -74,12 +79,20 @@
             using var client = HttpClientFactory.CreateClient();
             client.Timeout = TimeSpan.FromMinutes(10);
             var scanUrl = new Uri(new Uri(NavigationManager.BaseUri), "api/scan-now");
-            await client.PostAsync(scanUrl, null);
+            var response = await client.PostAsync(scanUrl, null);
+
+            if (response.StatusCode == HttpStatusCode.Conflict)
+            {
+                _scanInProgress = false;
+                Snackbar.Add("Scan already in progress", Severity.Warning);
+                return;
+            }
         }
         finally
         {
-            _scanning = false;
-            NavigationManager.NavigateTo(NavigationManager.Uri, forceLoad: true);
+            _scanInProgress = false;
         }
+
+        NavigationManager.NavigateTo(NavigationManager.Uri, forceLoad: true);
     }
 }
