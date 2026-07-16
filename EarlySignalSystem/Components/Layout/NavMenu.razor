@@ -76,10 +76,12 @@
 
         try
         {
-            using var client = HttpClientFactory.CreateClient();
-            client.Timeout = TimeSpan.FromMinutes(10);
-            var scanUrl = new Uri(new Uri(NavigationManager.BaseUri), "api/scan-now");
-            var response = await client.PostAsync(scanUrl, null);
+            // Named "ScanNow" client (Timeout зададен централно в Program.cs). BaseAddress се задава тук,
+            // не в AddHttpClient callback-а, защото NavigationManager е scoped/per-circuit в Blazor Server —
+            // недостъпен от root service provider-a, срещу който се извиква named-client configureClient.
+            using var client = HttpClientFactory.CreateClient("ScanNow");
+            client.BaseAddress = new Uri(NavigationManager.BaseUri);
+            var response = await client.PostAsync("api/scan-now", null);
 
             if (response.StatusCode == HttpStatusCode.Conflict)
             {
@@ -87,6 +89,12 @@
                 Snackbar.Add("Scan already in progress", Severity.Warning);
                 return;
             }
+        }
+        catch (Exception ex)
+        {
+            _scanInProgress = false;
+            Snackbar.Add($"Scan failed: {ex.Message}", Severity.Error);
+            return;
         }
         finally
         {

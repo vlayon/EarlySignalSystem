@@ -22,6 +22,13 @@ builder.Services.AddScoped<AppDbContext>(sp =>
     sp.GetRequiredService<IDbContextFactory<AppDbContext>>().CreateDbContext());
 
 builder.Services.AddHttpClient();
+// BaseAddress не се задава тук (viz. коментара в NavMenu.razor) — configureClient callback-ът на named
+// clients се извиква срещу root service provider-a, а NavigationManager е scoped/per-circuit в Blazor
+// Server, така че sp.GetRequiredService<NavigationManager>() тук би хвърлил изключение.
+builder.Services.AddHttpClient("ScanNow", client =>
+{
+    client.Timeout = TimeSpan.FromMinutes(10);
+});
 builder.Services.AddHttpClient<IDataCollectorService, DataCollectorService>();
 builder.Services.AddHttpClient<IAiAnalyzerService, AiAnalyzerService>();
 builder.Services.AddHttpClient<IStockPriceService, StockPriceService>();
