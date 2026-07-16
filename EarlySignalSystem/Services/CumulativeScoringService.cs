@@ -38,7 +38,8 @@ public class CumulativeScoringService : ICumulativeScoringService
             JobName = JobName
         };
         _dbContext.RunLogs.Add(runLog);
-        await _dbContext.SaveChangesAsync(cancellationToken);
+        var initialSaveCount = await _dbContext.SaveChangesAsync(cancellationToken);
+        _logger.LogInformation("SaveChangesAsync wrote {RowsSaved} row(s) after creating RunLog {RunLogId}", initialSaveCount, runLog.Id);
 
         try
         {
@@ -47,7 +48,8 @@ public class CumulativeScoringService : ICumulativeScoringService
             runLog.Status = "Completed";
             runLog.SignalsCollected = count;
             runLog.CompletedAt = DateTime.UtcNow;
-            await _dbContext.SaveChangesAsync(cancellationToken);
+            var completedSaveCount = await _dbContext.SaveChangesAsync(cancellationToken);
+            _logger.LogInformation("SaveChangesAsync wrote {RowsSaved} row(s) after marking RunLog {RunLogId} Completed", completedSaveCount, runLog.Id);
 
             return count;
         }
@@ -57,7 +59,8 @@ public class CumulativeScoringService : ICumulativeScoringService
             runLog.Status = "Failed";
             runLog.ErrorMessage = ex.Message;
             runLog.CompletedAt = DateTime.UtcNow;
-            await _dbContext.SaveChangesAsync(cancellationToken);
+            var failedSaveCount = await _dbContext.SaveChangesAsync(cancellationToken);
+            _logger.LogInformation("SaveChangesAsync wrote {RowsSaved} row(s) after marking RunLog {RunLogId} Failed", failedSaveCount, runLog.Id);
             throw;
         }
     }
@@ -162,7 +165,8 @@ public class CumulativeScoringService : ICumulativeScoringService
         // CumulativeScores е "текущо състояние" на shortlist-а, не исторически лог — всяко изчисление презаписва изцяло.
         _dbContext.CumulativeScores.RemoveRange(_dbContext.CumulativeScores);
         _dbContext.CumulativeScores.AddRange(scores);
-        await _dbContext.SaveChangesAsync(cancellationToken);
+        var cumulativeScoresSaveCount = await _dbContext.SaveChangesAsync(cancellationToken);
+        _logger.LogInformation("SaveChangesAsync wrote {RowsSaved} row(s) while saving {Count} CumulativeScores", cumulativeScoresSaveCount, scores.Count);
 
         _logger.LogInformation("Calculated cumulative scores for {Count} companies", scores.Count);
 
@@ -261,6 +265,9 @@ public class CumulativeScoringService : ICumulativeScoringService
             rank++;
         }
 
-        await _dbContext.SaveChangesAsync(cancellationToken);
+        var shortlistSaveCount = await _dbContext.SaveChangesAsync(cancellationToken);
+        _logger.LogInformation(
+            "SaveChangesAsync wrote {RowsSaved} row(s) while saving {Count} ShortlistSnapshot entries for scan {ScanDate:yyyy-MM-dd} #{ScanNumber}",
+            shortlistSaveCount, top5.Count, scanDate, scanNumber);
     }
 }
