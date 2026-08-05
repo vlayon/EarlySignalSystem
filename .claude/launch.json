@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "earlysignal-web",
+      "runtimeExecutable": "dotnet",
+      "runtimeArgs": ["run", "--project", "EarlySignalSystem", "--launch-profile", "http"],
+      "port": 5124
+    }
+  ]
+}

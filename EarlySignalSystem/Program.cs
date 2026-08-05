@@ -31,6 +31,7 @@ builder.Services.AddHttpClient("ScanNow", client =>
 });
 builder.Services.AddHttpClient<IDataCollectorService, DataCollectorService>();
 builder.Services.AddHttpClient<IAiAnalyzerService, AiAnalyzerService>();
+builder.Services.AddHttpClient<IYahooFinanceService, YahooFinanceService>();
 builder.Services.AddHttpClient<IStockPriceService, StockPriceService>();
 builder.Services.AddHttpClient<IOverboughtOversoldService, OverboughtOversoldService>();
 builder.Services.AddHttpClient<ITickerVerificationService, TickerVerificationService>();
@@ -81,16 +82,20 @@ app.MapPost("/api/scan-now", (IBackgroundJobClient backgroundJobs) =>
         // runs exactly once, only after AI Analyzer finishes.
         var eurLexJobId = backgroundJobs.Enqueue<IDataCollectorService>(
             s => s.CollectEurLexSignalsAsync(CancellationToken.None));
+        var epParliamentJobId = backgroundJobs.ContinueJobWith<IDataCollectorService>(
+            eurLexJobId, s => s.CollectEpParliamentSignalsAsync(CancellationToken.None));
         var secEdgarJobId = backgroundJobs.ContinueJobWith<IDataCollectorService>(
-            eurLexJobId, s => s.CollectSecEdgarSignalsAsync(CancellationToken.None));
+            epParliamentJobId, s => s.CollectSecEdgarSignalsAsync(CancellationToken.None));
         var secEdgar13DGJobId = backgroundJobs.ContinueJobWith<IDataCollectorService>(
             secEdgarJobId, s => s.CollectSecEdgar13DGSignalsAsync(CancellationToken.None));
         var tedJobId = backgroundJobs.ContinueJobWith<IDataCollectorService>(
             secEdgar13DGJobId, s => s.CollectTedSignalsAsync(CancellationToken.None));
-        var esmaJobId = backgroundJobs.ContinueJobWith<IDataCollectorService>(
-            tedJobId, s => s.CollectEsmaSignalsAsync(CancellationToken.None));
+        var oecdJobId = backgroundJobs.ContinueJobWith<IDataCollectorService>(
+            tedJobId, s => s.CollectOecdSignalsAsync(CancellationToken.None));
+        var amfJobId = backgroundJobs.ContinueJobWith<IDataCollectorService>(
+            oecdJobId, s => s.CollectAmfSignalsAsync(CancellationToken.None));
         var analyzerJobId = backgroundJobs.ContinueJobWith<IAiAnalyzerService>(
-            esmaJobId, s => s.AnalyzeSignalsAsync(CancellationToken.None));
+            amfJobId, s => s.AnalyzeSignalsAsync(CancellationToken.None));
         var scorerJobId = backgroundJobs.ContinueJobWith<ICumulativeScoringService>(
             analyzerJobId, s => s.CalculateScoresAsync(CancellationToken.None));
         var technicalJobId = backgroundJobs.ContinueJobWith<IOverboughtOversoldService>(

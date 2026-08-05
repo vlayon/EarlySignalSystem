@@ -1,10 +1,15 @@
 @page "/technical"
 @rendermode InteractiveServer
+@implements IDisposable
 @using EarlySignalSystem.Data
 @using EarlySignalSystem.Models
 @using EarlySignalSystem.Services
 @using Microsoft.EntityFrameworkCore
+@using Hangfire
+@using EarlySignalSystem.Extensions
 @inject IDbContextFactory<AppDbContext> DbContextFactory
+@inject IBackgroundJobClient BackgroundJobs
+@inject ISnackbar Snackbar
 
 <PageTitle>Technical Dashboard</PageTitle>
 
@@ -20,32 +25,82 @@
     }
     else
     {
-        <MudText Typo="Typo.h5" Style="font-weight:600;" Class="mb-3">Canal Status</MudText>
-        <MudGrid Class="mb-6">
-            @foreach (var card in _canalCards)
+        <MudText Typo="Typo.h5" Style="font-weight:600;" Class="mb-2">Pipeline Stages</MudText>
+        <MudGrid Spacing="2" Class="mb-2">
+            @for (var stageIndex = 0; stageIndex < _stages.Count; stageIndex++)
             {
-                <MudItem xs="12" sm="6" md="4">
-                    <MudCard Style="@($"background:#1a1d2e; border-left:4px solid {GetCanalBorderColor(card)}; height:100%;")">
-                        <MudCardContent>
-                            <MudStack Row="true" Justify="Justify.SpaceBetween" AlignItems="AlignItems.Center">
-                                <MudText Typo="Typo.h6" Style="font-weight:700;">@card.DisplayName</MudText>
-                                <MudChip T="string" Color="@GetCanalStatusColor(card)" Variant="Variant.Filled" Size="Size.Small">@GetCanalStatusLabel(card)</MudChip>
-                            </MudStack>
+                var stage = _stages[stageIndex];
 
-                            @if (card.IsDisabled)
-                            {
-                                <MudText Typo="Typo.body2" Class="mud-text-secondary mt-2">Collector temporarily disabled</MudText>
-                            }
-                            else if (card.LatestRun is null)
-                            {
-                                <MudText Typo="Typo.body2" Class="mud-text-secondary mt-2">No runs yet</MudText>
-                            }
-                            else
-                            {
-                                <MudText Typo="Typo.body2" Class="mt-2">@card.MetricLabel: @card.LatestRun.SignalsCollected</MudText>
-                                <MudText Typo="Typo.body2" Class="mud-text-secondary">Duration: @GetDurationLabel(card.LatestRun)</MudText>
-                                <MudText Typo="Typo.body2" Class="mud-text-secondary">@card.LatestRun.StartedAt.ToString("dd MMM yyyy, HH:mm")</MudText>
-                            }
+                @if (ArrowBeforeStageIndex.Contains(stageIndex))
+                {
+                    <MudItem xs="12" Class="d-flex justify-center pa-0">
+                        <MudIcon Icon="@Icons.Material.Filled.ArrowDownward" Class="mud-text-secondary" Size="Size.Small" />
+                    </MudItem>
+                }
+
+                <MudItem xs="12" sm="@(stage.Cards.Count == 1 ? 6 : 12)">
+                    <MudCard Style="background:#1a1d2e; height:100%;">
+                        <MudCardHeader Class="pb-0 pt-2">
+                            <CardHeaderContent>
+                                <MudText Typo="Typo.subtitle1" Style="font-weight:700;">@stage.Name</MudText>
+                                <MudText Typo="Typo.caption" Class="mud-text-secondary">@stage.Description</MudText>
+                            </CardHeaderContent>
+                        </MudCardHeader>
+                        <MudCardContent Class="pt-2">
+                            <MudGrid Spacing="1">
+                                @foreach (var card in stage.Cards)
+                                {
+                                    <MudItem xs="12" sm="6" md="@(stage.Cards.Count == 1 ? 12 : 3)">
+                                        <MudPaper Style="@($"background:#20243a; border-left:3px solid {GetCanalBorderColor(card)}; height:100%; padding:8px 12px;")">
+                                            <MudStack Spacing="1">
+                                                <MudStack Row="true" Justify="Justify.SpaceBetween" AlignItems="AlignItems.Center" Spacing="1">
+                                                    <MudStack Row="true" Spacing="1" AlignItems="AlignItems.Center">
+                                                        <MudText Typo="Typo.body2" Style="font-weight:700;">@card.DisplayName</MudText>
+                                                        <MudTooltip Text="@card.Description" Arrow="true" Placement="Placement.Top">
+                                                            <MudIcon Icon="@Icons.Material.Filled.Info" Size="Size.Small" Class="mud-text-secondary" />
+                                                        </MudTooltip>
+                                                    </MudStack>
+                                                    <MudChip T="string" Color="@GetCanalStatusColor(card)" Variant="Variant.Filled" Size="Size.Small" Class="ma-0">@GetCanalStatusLabel(card)</MudChip>
+                                                </MudStack>
+
+                                                @if (card.IsDisabled)
+                                                {
+                                                    <MudText Typo="Typo.caption" Class="mud-text-secondary">Disabled</MudText>
+                                                }
+                                                else if (card.LatestRun is null)
+                                                {
+                                                    <MudText Typo="Typo.caption" Class="mud-text-secondary">No runs yet</MudText>
+                                                }
+                                                else
+                                                {
+                                                    <MudText Typo="Typo.caption" Class="mud-text-secondary">@card.MetricLabel: @card.LatestRun.SignalsCollected · @GetDurationLabel(card.LatestRun)</MudText>
+                                                    <MudText Typo="Typo.caption" Class="mud-text-secondary">@card.LatestRun.StartedAt.ToLocalDisplay(CompactDateTimeFormat)</MudText>
+                                                }
+
+                                                @if (!card.IsDisabled && card.JobKey is not null)
+                                                {
+                                                    // justTriggered дава мигновена обратна връзка веднага след клика (преди
+                                                    // следващия auto-refresh тик); backendRunning следва реалния статус от
+                                                    // RunLog-а, опресняван на всеки RefreshInterval — бутонът се самодезактивира
+                                                    // отново при следващ Run/Completed цикъл.
+                                                    var justTriggered = _triggeredJobs.Contains(card.JobKey);
+                                                    var backendRunning = card.LatestRun?.Status == "Running";
+                                                    var isRunning = justTriggered || backendRunning;
+                                                    <MudButton Variant="Variant.Outlined"
+                                                               Color="@(isRunning ? Color.Success : Color.Primary)"
+                                                               Size="Size.Small"
+                                                               FullWidth="true"
+                                                               Disabled="isRunning"
+                                                               StartIcon="@(isRunning ? Icons.Material.Filled.HourglassTop : Icons.Material.Filled.PlayArrow)"
+                                                               OnClick="() => RunJobNowAsync(card.JobKey)">
+                                                        @(backendRunning ? "Running..." : justTriggered ? "Started" : "Run now")
+                                                    </MudButton>
+                                                }
+                                            </MudStack>
+                                        </MudPaper>
+                                    </MudItem>
+                                }
+                            </MudGrid>
                         </MudCardContent>
                     </MudCard>
                 </MudItem>
@@ -82,7 +137,7 @@
                 <MudCard Style="background:#1a1d2e; height:100%;">
                     <MudCardContent>
                         <MudText Typo="Typo.body2" Class="mud-text-secondary">Last scan</MudText>
-                        <MudText Typo="Typo.h6" Style="font-weight:700;">@(_lastScanTimestamp?.ToString("dd MMM yyyy, HH:mm") ?? "—")</MudText>
+                        <MudText Typo="Typo.h6" Style="font-weight:700;">@(_lastScanTimestamp?.ToLocalDisplay() ?? "—")</MudText>
                     </MudCardContent>
                 </MudCard>
             </MudItem>
@@ -107,6 +162,7 @@
                 </HeaderContent>
                 <RowTemplate>
                     <MudTd DataLabel="Date">@context.Date.ToString("dd MMM yyyy")</MudTd>
+                    @* context.Date вече е локална дата — виж LoadScanHistoryAsync, групирано по ToLocalDate() *@
                     <MudTd DataLabel="EUR-Lex">@FormatSignalCount(context.EurLexSignals)</MudTd>
                     <MudTd DataLabel="TED">@FormatSignalCount(context.TedSignals)</MudTd>
                     <MudTd DataLabel="SEC EDGAR">@FormatSignalCount(context.SecEdgarSignals)</MudTd>
@@ -123,9 +179,24 @@
 
 @code {
     private const string NeutralBorderColor = "#374151";
+    private const string CompactDateTimeFormat = "dd.MM HH:mm";
+    private static readonly TimeSpan RefreshInterval = TimeSpan.FromSeconds(5);
+    // Stage 2 (AI Analysis) и Stage 3 (Scoring & Shortlisting) имат само по 1 job всяка, затова се
+    // показват sm=6 една до друга на същия визуален ред (виж markup-а: MudItem sm е 6, когато
+    // stage.Cards.Count == 1) — не им трябва стрелка помежду им. Стрелка се показва само пред индекс 1
+    // (влизане в реда на Stage 2+3) и пред индекс 3 (Stage 4, следващ пълен ред).
+    private static readonly HashSet<int> ArrowBeforeStageIndex = [1, 3];
 
     private bool _loading = true;
+    private readonly HashSet<string> _triggeredJobs = [];
+    // Кога е натиснат "Run now" за всеки jobKey — пази оптимистичния "Running" статус верен, докато
+    // auto-refresh-ът не потвърди, че РЕАЛНО НОВ run (стартирал СЛЕД клика) е завършил. Без click-time
+    // проверката, оптимистичният флаг би могъл да се изчисти от стар "Completed" RunLog, който още не
+    // е бил заменен от новия run (race между клика и Hangfire-worker-a, който го пикапва).
+    private readonly Dictionary<string, DateTime> _triggeredAt = new();
+    private readonly CancellationTokenSource _refreshCts = new();
     private List<CanalCard> _canalCards = [];
+    private List<CanalStage> _stages = [];
     private int _totalSignalsToday;
     private int _companiesAnalyzedToday;
     private int _shortlistSize;
@@ -134,12 +205,45 @@
 
     protected override async Task OnInitializedAsync()
     {
+        await LoadPipelineDataAsync();
+        _loading = false;
+        _ = RefreshLoopAsync(_refreshCts.Token);
+    }
+
+    // Опреснява pipeline-а на всеки RefreshInterval, докато потребителят е на страницата — без това,
+    // job-ове по-надолу във веригата, които вече реално са Running, продължават да показват старото си
+    // last-known състояние (напр. "Completed" от вчера) до ръчен reload, което изглежда подвеждащо.
+    private async Task RefreshLoopAsync(CancellationToken cancellationToken)
+    {
+        using var timer = new PeriodicTimer(RefreshInterval);
+        try
+        {
+            while (await timer.WaitForNextTickAsync(cancellationToken))
+            {
+                await LoadPipelineDataAsync();
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Компонентът е disposed (потребителят е напуснал страницата) — нормално спиране.
+        }
+    }
+
+    public void Dispose()
+    {
+        _refreshCts.Cancel();
+        _refreshCts.Dispose();
+    }
+
+    private async Task LoadPipelineDataAsync()
+    {
         await using var dbContext = await DbContextFactory.CreateDbContextAsync();
 
         var today = DateTime.UtcNow.Date;
 
         var latestRunLogs = new Dictionary<string, RunLog?>();
-        foreach (var jobName in new[] { "EUR-Lex", "SEC-EDGAR", "TED", "ESMA", "AI-Analyzer", "Cumulative-Scorer" })
+        foreach (var jobName in new[] { "EUR-Lex", "EP-Parliament", "SEC-EDGAR", "SEC-EDGAR-13DG", "TED", "OECD", "AMF-France", "AI-Analyzer", "Cumulative-Scorer", "Technical-Assessor", "Ticker-Verifier" })
         {
             latestRunLogs[jobName] = await dbContext.RunLogs
                 .Where(r => r.JobName == jobName)
@@ -147,20 +251,67 @@
                 .FirstOrDefaultAsync();
         }
 
+        var eurLexCard = new CanalCard("EUR-Lex", "Signals collected", latestRunLogs["EUR-Lex"], false,
+            "Reads the EU's Official Journal for new laws and regulations. The idea: new legislation often affects specific companies before the market reacts in their price.", "eur-lex");
+        var epParliamentCard = new CanalCard("EU Parliament", "Signals collected", latestRunLogs["EP-Parliament"], false,
+            "Tracks draft committee reports and opinions — months before the law is finally adopted and published in EUR-Lex. The earliest signal in the system for upcoming legislation.", "ep-parliament");
+        var secEdgarCard = new CanalCard("SEC EDGAR Form 4", "Signals collected", latestRunLogs["SEC-EDGAR"], false,
+            "Tracks when directors or major owners buy shares of their own company (\"insider buying\"). People inside the company buy when they believe it will grow.", "sec-edgar");
+        var secEdgar13DGCard = new CanalCard("SEC EDGAR 13D/13G", "Signals collected", latestRunLogs["SEC-EDGAR-13DG"], false,
+            "Tracks when an investor acquires more than 5% of a company's shares (13D/13G filings). A large investor building a stake often sees something the market hasn't noticed yet.", "sec-edgar-13dg");
+        var tedCard = new CanalCard("TED", "Signals collected", latestRunLogs["TED"], false,
+            "Tracks EU public procurement. A company that wins a large government contract usually gets secured revenue for years ahead — an early growth indicator.", "ted");
+        var oecdCard = new CanalCard("OECD", "Signals collected", latestRunLogs["OECD"], false,
+            "Tracks the OECD's monthly Composite Leading Indicator by country — fires a signal when the index crosses the 100 threshold (a turn in the economic cycle, 4-8 months before it shows up in real data).", "oecd");
+        var amfCard = new CanalCard("AMF (France)", "Signals collected", latestRunLogs["AMF-France"], false,
+            "Tracks the French market regulator's (AMF) short-selling register — ESMA moved its own register behind a CAPTCHA, so we switched to France's national regulator, which publishes the same type of data freely (scope is now limited to FR-listed companies).", "amf");
+        var aiAnalyzerCard = new CanalCard("AI Analyzer", "Signals analyzed", latestRunLogs["AI-Analyzer"], false,
+            "Takes all collected signals and asks AI (Claude) which real public companies look promising based on them.", "ai-analyzer");
+        var cumulativeScorerCard = new CanalCard("Cumulative Scorer", "Companies scored", latestRunLogs["Cumulative-Scorer"], false,
+            "Aggregates all signals per company into one overall result (Score) and decides which companies make the top-5 list (shortlist).", "cumulative-scorer");
+        var technicalAssessorCard = new CanalCard("Technical Assessor", "Companies assessed", latestRunLogs["Technical-Assessor"], false,
+            "Takes the top-5 shortlist companies and assesses whether their price looks overbought or oversold — a technical, not fundamental, indicator.", "technical-assessor");
+        var tickerVerifierCard = new CanalCard("Ticker Verifier", "Tickers verified", latestRunLogs["Ticker-Verifier"], false,
+            "Looks up the real stock ticker for each newly-discovered company — first for free in the SEC registry, then Alpha Vantage — so prices and charts can be shown.", "ticker-verifier");
+
         _canalCards =
         [
-            new CanalCard("EUR-Lex", "Signals collected", latestRunLogs["EUR-Lex"], false),
-            new CanalCard("SEC EDGAR Form 4", "Signals collected", latestRunLogs["SEC-EDGAR"], false),
-            new CanalCard("TED", "Signals collected", latestRunLogs["TED"], false),
-            new CanalCard("OECD", "Signals collected", null, true),
-            new CanalCard("ESMA", "Signals collected", latestRunLogs["ESMA"], false),
-            new CanalCard("AI Analyzer", "Signals analyzed", latestRunLogs["AI-Analyzer"], false),
-            new CanalCard("Cumulative Scorer", "Companies scored", latestRunLogs["Cumulative-Scorer"], false),
+            eurLexCard, epParliamentCard, secEdgarCard, secEdgar13DGCard, tedCard, oecdCard, amfCard,
+            aiAnalyzerCard, cumulativeScorerCard, technicalAssessorCard, tickerVerifierCard,
+        ];
+
+        // Изчистваме оптимистичния "Running" флаг само след като auto-refresh-ът потвърди РЕАЛЕН нов run
+        // (стартирал СЛЕД клика), стигнал терминален статус — иначе флагът увисва завинаги (LatestRun си
+        // остава последният Completed/Failed запис и никога не минава синхронно през "Running" в UI, ако
+        // Hangfire worker-ът все още не е пикапнал job-а към момента на този refresh tick).
+        foreach (var jobKey in _triggeredJobs.ToList())
+        {
+            var card = _canalCards.FirstOrDefault(c => c.JobKey == jobKey);
+            if (card?.LatestRun is { } run &&
+                _triggeredAt.TryGetValue(jobKey, out var triggeredAt) &&
+                run.StartedAt >= triggeredAt &&
+                run.Status is "Completed" or "Failed")
+            {
+                _triggeredJobs.Remove(jobKey);
+                _triggeredAt.Remove(jobKey);
+            }
+        }
+
+        _stages =
+        [
+            new CanalStage("1 · Signal Collection", "Independent sources scanning for raw signals — legislation, insider trades, procurement contracts, macro indicators, and short-interest data.",
+                [eurLexCard, epParliamentCard, secEdgarCard, secEdgar13DGCard, tedCard, oecdCard, amfCard]),
+            new CanalStage("2 · AI Analysis", "Claude reviews all collected signals and identifies real, publicly-traded companies with a concrete rationale.",
+                [aiAnalyzerCard]),
+            new CanalStage("3 · Scoring & Shortlisting", "Aggregates signals per company into a score and decides which companies make the top-5 shortlist.",
+                [cumulativeScorerCard]),
+            new CanalStage("4 · Enrichment", "Resolves stock tickers and technical (overbought/oversold) indicators for the shortlisted companies.",
+                [technicalAssessorCard, tickerVerifierCard]),
         ];
 
         _totalSignalsToday = await dbContext.RunLogs
             .Where(r => r.StartedAt >= today && r.StartedAt < today.AddDays(1)
-                && r.JobName != null && new[] { "EUR-Lex", "SEC-EDGAR", "TED", "ESMA" }.Contains(r.JobName))
+                && r.JobName != null && new[] { "EUR-Lex", "EP-Parliament", "SEC-EDGAR", "TED", "OECD", "AMF-France" }.Contains(r.JobName))
             .SumAsync(r => (int?)r.SignalsCollected) ?? 0;
 
         _companiesAnalyzedToday = latestRunLogs["Cumulative-Scorer"]?.SignalsCollected ?? 0;
@@ -182,8 +333,6 @@
         }
 
         await LoadScanHistoryAsync(dbContext, today);
-
-        _loading = false;
     }
 
     private async Task LoadScanHistoryAsync(AppDbContext dbContext, DateTime today)
@@ -199,8 +348,10 @@
             .Select(p => new { p.Ticker, p.CompanyName, p.PickedAt })
             .ToListAsync();
 
-        var dates = runLogs.Select(r => r.StartedAt.Date)
-            .Concat(picks.Select(p => p.PickedAt.Date))
+        // Групираме по локална дата (не UTC) — event близо до полунощ трябва да падне в деня, в
+        // който потребителят реално го е видял, не в UTC деня.
+        var dates = runLogs.Select(r => r.StartedAt.ToLocalDate())
+            .Concat(picks.Select(p => p.PickedAt.ToLocalDate()))
             .Distinct()
             .OrderByDescending(d => d)
             .ToList();
@@ -208,7 +359,7 @@
         var rows = new List<ScanHistoryRow>();
         foreach (var date in dates)
         {
-            var dayRuns = runLogs.Where(r => r.StartedAt.Date == date).ToList();
+            var dayRuns = runLogs.Where(r => r.StartedAt.ToLocalDate() == date).ToList();
 
             var eurLexSignals = GetSignalsForJob(dayRuns, "EUR-Lex");
             var tedSignals = GetSignalsForJob(dayRuns, "TED");
@@ -220,7 +371,7 @@
                 continue;
             }
 
-            var companies = picks.Where(p => p.PickedAt.Date == date)
+            var companies = picks.Where(p => p.PickedAt.ToLocalDate() == date)
                 .Select(p => new { p.Ticker, p.CompanyName })
                 .Distinct()
                 .Count();
@@ -239,7 +390,7 @@
     }
 
     private static readonly string[] ImportantJobs = ["EUR-Lex", "TED", "SEC-EDGAR", "AI-Analyzer"];
-    private static readonly string[] WarningOnlyJobs = ["ESMA", "OECD"];
+    private static readonly string[] WarningOnlyJobs = [];
 
     private static string GetScanStatus(List<RunLog> dayRuns)
     {
@@ -269,9 +420,106 @@
 
     private static string FormatSignalCount(int? count) => count?.ToString() ?? "–";
 
-    private static string GetCanalBorderColor(CanalCard card)
+    // Всеки job се пуска изолирано, извън Scan Now веригата — само enqueue-ва конкретния job,
+    // без ScanGate семафора (той пази само пълната верига от едновременно пускане два пъти).
+    private void RunJobNowAsync(string jobKey)
+    {
+        switch (jobKey)
+        {
+            case "eur-lex":
+                BackgroundJobs.Enqueue<IDataCollectorService>(s => s.CollectEurLexSignalsAsync(CancellationToken.None));
+                break;
+            case "ep-parliament":
+                BackgroundJobs.Enqueue<IDataCollectorService>(s => s.CollectEpParliamentSignalsAsync(CancellationToken.None));
+                break;
+            case "sec-edgar":
+                BackgroundJobs.Enqueue<IDataCollectorService>(s => s.CollectSecEdgarSignalsAsync(CancellationToken.None));
+                break;
+            case "sec-edgar-13dg":
+                BackgroundJobs.Enqueue<IDataCollectorService>(s => s.CollectSecEdgar13DGSignalsAsync(CancellationToken.None));
+                break;
+            case "ted":
+                BackgroundJobs.Enqueue<IDataCollectorService>(s => s.CollectTedSignalsAsync(CancellationToken.None));
+                break;
+            case "oecd":
+                BackgroundJobs.Enqueue<IDataCollectorService>(s => s.CollectOecdSignalsAsync(CancellationToken.None));
+                break;
+            case "amf":
+                BackgroundJobs.Enqueue<IDataCollectorService>(s => s.CollectAmfSignalsAsync(CancellationToken.None));
+                break;
+            case "ai-analyzer":
+                BackgroundJobs.Enqueue<IAiAnalyzerService>(s => s.AnalyzeSignalsAsync(CancellationToken.None));
+                break;
+            case "cumulative-scorer":
+                BackgroundJobs.Enqueue<ICumulativeScoringService>(s => s.CalculateScoresAsync(CancellationToken.None));
+                break;
+            case "technical-assessor":
+                BackgroundJobs.Enqueue<IOverboughtOversoldService>(s => s.AssessTopCompaniesAsync(CancellationToken.None));
+                break;
+            case "ticker-verifier":
+                BackgroundJobs.Enqueue<ITickerVerificationService>(s => s.VerifyPendingTickersAsync(CancellationToken.None));
+                break;
+            default:
+                return;
+        }
+
+        _triggeredJobs.Add(jobKey);
+        _triggeredAt[jobKey] = DateTime.UtcNow;
+        Snackbar.Add($"{jobKey} started", Severity.Success);
+    }
+
+    // Card-ите се зареждат веднъж в OnInitializedAsync — без live polling, статусът остава замразен
+    // на last-known стойност. Когато потребителят натисне "Run now" в текущата сесия, _triggeredJobs
+    // override-ва статуса оптимистично на "Running", докато страницата не се презареди с истински данни.
+    private bool IsOptimisticallyRunning(CanalCard card) => card.JobKey is not null && _triggeredJobs.Contains(card.JobKey);
+
+    // Scan Now веригата е строго последователна (ContinueJobWith, виж Program.cs) — всеки job чака
+    // предходния да приключи. Но всеки card тук показва последния запис в RunLog-а за съответния job,
+    // независимо от кога е бил — ако job-ът по-надолу във веригата все още не е стартирал в ТЕКУЩИЯ scan,
+    // картата му ще покаже стар "Completed" от вчерашния run, което изглежда сякаш всичко тече паралелно.
+    // За да го различим: ако някой по-ранен job във веригата в момента е Running, или е стартирал
+    // по-late от последния run на този job, значи веригата вече е задминала този job, но той още не
+    // е стигнал своя ред в тази вълна — показваме "Queued" вместо подвеждащото старо състояние.
+    private bool IsQueuedBehindEarlierStage(CanalCard card)
+    {
+        if (card.IsDisabled || IsOptimisticallyRunning(card))
+        {
+            return false;
+        }
+
+        var index = _canalCards.IndexOf(card);
+        var thisStarted = card.LatestRun?.StartedAt;
+
+        for (var i = 0; i < index; i++)
+        {
+            var earlierRun = _canalCards[i].LatestRun;
+            if (earlierRun is null)
+            {
+                continue;
+            }
+
+            if (earlierRun.Status == "Running" || thisStarted is null || earlierRun.StartedAt > thisStarted)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private string GetCanalBorderColor(CanalCard card)
     {
         if (card.IsDisabled)
+        {
+            return NeutralBorderColor;
+        }
+
+        if (IsOptimisticallyRunning(card))
+        {
+            return EarlySignalTheme.ColorWarning;
+        }
+
+        if (IsQueuedBehindEarlierStage(card))
         {
             return NeutralBorderColor;
         }
@@ -285,9 +533,19 @@
         };
     }
 
-    private static Color GetCanalStatusColor(CanalCard card)
+    private Color GetCanalStatusColor(CanalCard card)
     {
         if (card.IsDisabled)
+        {
+            return Color.Default;
+        }
+
+        if (IsOptimisticallyRunning(card))
+        {
+            return Color.Warning;
+        }
+
+        if (IsQueuedBehindEarlierStage(card))
         {
             return Color.Default;
         }
@@ -301,11 +559,21 @@
         };
     }
 
-    private static string GetCanalStatusLabel(CanalCard card)
+    private string GetCanalStatusLabel(CanalCard card)
     {
         if (card.IsDisabled)
         {
             return "Disabled";
+        }
+
+        if (IsQueuedBehindEarlierStage(card))
+        {
+            return "Queued";
+        }
+
+        if (IsOptimisticallyRunning(card))
+        {
+            return "Running";
         }
 
         return card.LatestRun?.Status ?? "No runs yet";
@@ -330,7 +598,9 @@
         _ => Color.Default,
     };
 
-    private sealed record CanalCard(string DisplayName, string MetricLabel, RunLog? LatestRun, bool IsDisabled);
+    private sealed record CanalCard(string DisplayName, string MetricLabel, RunLog? LatestRun, bool IsDisabled, string Description, string? JobKey = null);
+
+    private sealed record CanalStage(string Name, string Description, List<CanalCard> Cards);
 
     private sealed record ScanHistoryRow(DateTime Date, int? EurLexSignals, int? TedSignals, int? SecEdgarSignals, int? AiAnalyzerSignals, int Companies, string Status);
 }

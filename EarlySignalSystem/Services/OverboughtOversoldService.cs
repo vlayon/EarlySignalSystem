@@ -23,18 +23,28 @@ public class OverboughtOversoldService : IOverboughtOversoldService
     private readonly AppDbContext _dbContext;
     private readonly HttpClient _httpClient;
     private readonly IConfiguration _configuration;
+    private readonly IYahooFinanceService _yahooFinanceService;
     private readonly ILogger<OverboughtOversoldService> _logger;
 
     // RSI/MACD кеш по тикер за текущия run — AssessTopCompaniesAsync и повторни AssessAsync извиквания
     // за същия тикер споделят един fetch, за да пестим Alpha Vantage free tier (25 заявки/ден).
     private readonly Dictionary<string, decimal?> _rsiCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, (decimal? Macd, decimal? Signal, decimal? Histogram)> _macdCache = new(StringComparer.OrdinalIgnoreCase);
+    // Yahoo дневните closes се ползват и от RSI, и от MACD изчислението — един fetch на тикър, споделен
+    // между двете, вместо RSI и MACD да викат Yahoo поотделно.
+    private readonly Dictionary<string, IReadOnlyDictionary<DateTime, decimal>?> _yahooClosesCache = new(StringComparer.OrdinalIgnoreCase);
 
-    public OverboughtOversoldService(AppDbContext dbContext, HttpClient httpClient, IConfiguration configuration, ILogger<OverboughtOversoldService> logger)
+    private const int RsiPeriod = 14;
+    private const int MacdFastPeriod = 12;
+    private const int MacdSlowPeriod = 26;
+    private const int MacdSignalPeriod = 9;
+
+    public OverboughtOversoldService(AppDbContext dbContext, HttpClient httpClient, IConfiguration configuration, IYahooFinanceService yahooFinanceService, ILogger<OverboughtOversoldService> logger)
     {
         _dbContext = dbContext;
         _httpClient = httpClient;
         _configuration = configuration;
+        _yahooFinanceService = yahooFinanceService;
         _logger = logger;
     }
 
@@ -59,6 +69,11 @@ public class OverboughtOversoldService : IOverboughtOversoldService
             var assessed = 0;
             foreach (var company in topCompanies)
             {
+                if (string.IsNullOrWhiteSpace(company.Ticker))
+                {
+                    continue;
+                }
+
                 try
                 {
                     var assessment = await AssessAsync(company.Ticker, null, cancellationToken);
@@ -159,6 +174,18 @@ public class OverboughtOversoldService : IOverboughtOversoldService
             return cached;
         }
 
+        var yahooCloses = await GetYahooClosesAsync(ticker, cancellationToken);
+        if (yahooCloses is not null)
+        {
+            var closesAscending = yahooCloses.OrderBy(kvp => kvp.Key).Select(kvp => kvp.Value).ToList();
+            var yahooRsi = CalculateRsi(closesAscending);
+            if (yahooRsi is not null)
+            {
+                _rsiCache[ticker] = yahooRsi;
+                return yahooRsi;
+            }
+        }
+
         try
         {
             var url = string.Format(RsiApiUrl, Uri.EscapeDataString(ticker), apiKey);
@@ -201,6 +228,18 @@ public class OverboughtOversoldService : IOverboughtOversoldService
         if (_macdCache.TryGetValue(ticker, out var cached))
         {
             return cached;
+        }
+
+        var yahooCloses = await GetYahooClosesAsync(ticker, cancellationToken);
+        if (yahooCloses is not null)
+        {
+            var closesAscending = yahooCloses.OrderBy(kvp => kvp.Key).Select(kvp => kvp.Value).ToList();
+            var yahooMacd = CalculateMacd(closesAscending);
+            if (yahooMacd.Macd is not null)
+            {
+                _macdCache[ticker] = yahooMacd;
+                return yahooMacd;
+            }
         }
 
         try
@@ -310,6 +349,108 @@ public class OverboughtOversoldService : IOverboughtOversoldService
             _logger.LogWarning(ex, "Failed to parse Claude technical assessment JSON for {Ticker}: {Json}", ticker, json);
             return null;
         }
+    }
+
+    private async Task<IReadOnlyDictionary<DateTime, decimal>?> GetYahooClosesAsync(string ticker, CancellationToken cancellationToken)
+    {
+        if (_yahooClosesCache.TryGetValue(ticker, out var cached))
+        {
+            return cached;
+        }
+
+        var series = await _yahooFinanceService.GetDailyClosesAsync(ticker, cancellationToken);
+        _yahooClosesCache[ticker] = series;
+        return series;
+    }
+
+    // Wilder's smoothing — същият подход, който Alpha Vantage документира за собствения си RSI endpoint,
+    // затова стойностите би трябвало да съвпадат в разумни граници с AV-версията за приемственост.
+    private static decimal? CalculateRsi(List<decimal> closesAscending)
+    {
+        if (closesAscending.Count <= RsiPeriod)
+        {
+            return null;
+        }
+
+        decimal avgGain = 0, avgLoss = 0;
+        for (var i = 1; i <= RsiPeriod; i++)
+        {
+            var change = closesAscending[i] - closesAscending[i - 1];
+            if (change > 0) { avgGain += change; } else { avgLoss += -change; }
+        }
+
+        avgGain /= RsiPeriod;
+        avgLoss /= RsiPeriod;
+
+        for (var i = RsiPeriod + 1; i < closesAscending.Count; i++)
+        {
+            var change = closesAscending[i] - closesAscending[i - 1];
+            var gain = change > 0 ? change : 0;
+            var loss = change < 0 ? -change : 0;
+            avgGain = (avgGain * (RsiPeriod - 1) + gain) / RsiPeriod;
+            avgLoss = (avgLoss * (RsiPeriod - 1) + loss) / RsiPeriod;
+        }
+
+        if (avgLoss == 0)
+        {
+            return 100m;
+        }
+
+        var rs = avgGain / avgLoss;
+        return 100m - 100m / (1 + rs);
+    }
+
+    // Стандартен MACD(12,26,9): MACD line = EMA12 - EMA26, Signal = EMA9 на MACD line-а, Histogram = MACD - Signal.
+    private static (decimal? Macd, decimal? Signal, decimal? Histogram) CalculateMacd(List<decimal> closesAscending)
+    {
+        if (closesAscending.Count <= MacdSlowPeriod + MacdSignalPeriod)
+        {
+            return (null, null, null);
+        }
+
+        var emaFast = CalculateEmaSeries(closesAscending, MacdFastPeriod);
+        var emaSlow = CalculateEmaSeries(closesAscending, MacdSlowPeriod);
+
+        // emaFast стартира по-рано във времето от emaSlow (по-къс период) — подравняваме по реалната дата,
+        // не по индекс, преди да извадим двете серии.
+        var offset = emaFast.Count - emaSlow.Count;
+        var macdLine = new List<decimal>(emaSlow.Count);
+        for (var i = 0; i < emaSlow.Count; i++)
+        {
+            macdLine.Add(emaFast[i + offset] - emaSlow[i]);
+        }
+
+        var signalLine = CalculateEmaSeries(macdLine, MacdSignalPeriod);
+        if (signalLine.Count == 0)
+        {
+            return (null, null, null);
+        }
+
+        var macd = macdLine[^1];
+        var signal = signalLine[^1];
+        return (macd, signal, macd - signal);
+    }
+
+    // Стандартна EMA: seed-ната със SMA на първите `period` стойности, после стандартна exponential recurrence.
+    private static List<decimal> CalculateEmaSeries(List<decimal> values, int period)
+    {
+        var result = new List<decimal>();
+        if (values.Count < period)
+        {
+            return result;
+        }
+
+        var multiplier = 2m / (period + 1);
+        var ema = values.Take(period).Average();
+        result.Add(ema);
+
+        for (var i = period; i < values.Count; i++)
+        {
+            ema = (values[i] - ema) * multiplier + ema;
+            result.Add(ema);
+        }
+
+        return result;
     }
 
     private static string NormalizeAssessment(string? assessment) => assessment?.Trim() switch

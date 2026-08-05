@@ -11,7 +11,7 @@ namespace EarlySignalSystem.Services;
 public class AiAnalyzerService : IAiAnalyzerService
 {
     private const string ApiUrl = "https://api.anthropic.com/v1/messages";
-    private const string Model = "claude-haiku-4-5";
+    private const string Model = "claude-sonnet-5";
     // По-строгият prompt изисква 2-изреченски structured rationale за всяка компания — 1000 токена бяха
     // прекалено малко и Claude режеше отговора си по средата на JSON-а (truncated -> невалиден JSON, batch-ът
     // оставаше Processed=false завинаги, потвърдено на живо).
@@ -91,7 +91,16 @@ public class AiAnalyzerService : IAiAnalyzerService
 
             foreach (var company in analysis.Companies)
             {
-                var resolvedCompany = await ResolveCompanyAsync(company.CompanyName, companyCache, cancellationToken);
+                // Defense in depth: понякога AI-ят въпреки инструкцията в BuildPrompt все пак връща
+                // дисквалифицираща бележка вътре в companyName (напр. "Kemin Industries (private equity
+                // backed - NOT ELIGIBLE)") вместо просто да пропусне компанията — пропускаме такива picks тук.
+                if (company.CompanyName.Contains("NOT ELIGIBLE", StringComparison.OrdinalIgnoreCase))
+                {
+                    _logger.LogWarning("Skipping AI pick with disqualification note embedded in companyName: {CompanyName}", company.CompanyName);
+                    continue;
+                }
+
+                var resolvedCompany = await ResolveCompanyAsync(company.CompanyName, company.TickerHint, companyCache, cancellationToken);
 
                 var companyPick = new CompanyPick
                 {
@@ -180,7 +189,7 @@ public class AiAnalyzerService : IAiAnalyzerService
     // договарят за идентична форма на името, напр. "BMW" срещу "Bayerische Motoren Werke AG").
     // Ако не намери нищо, създава нов Company запис с Ticker = null — ще се резолвне по-късно от
     // TickerVerificationService.
-    private async Task<Company> ResolveCompanyAsync(string companyName, Dictionary<string, Company> companyCache, CancellationToken cancellationToken)
+    private async Task<Company> ResolveCompanyAsync(string companyName, string? tickerHint, Dictionary<string, Company> companyCache, CancellationToken cancellationToken)
     {
         if (companyCache.TryGetValue(companyName, out var cached))
         {
@@ -199,6 +208,7 @@ public class AiAnalyzerService : IAiAnalyzerService
         var newCompany = new Company
         {
             CompanyName = companyName,
+            TickerHint = string.IsNullOrWhiteSpace(tickerHint) ? null : tickerHint.Trim().ToUpperInvariant(),
             TickerVerified = false,
             CreatedAt = DateTime.UtcNow,
             IsActive = true
@@ -220,13 +230,14 @@ public class AiAnalyzerService : IAiAnalyzerService
         sb.AppendLine("Do NOT return: industry categories, government agencies, subsidiaries of private companies, consortiums, or any entity without a publicly traded stock.");
         sb.AppendLine("Do NOT return descriptions like \"X or similar companies\" or \"companies that provide Y\".");
         sb.AppendLine("If you cannot identify a specific publicly listed company directly affected, skip it entirely — return fewer companies rather than inventing ones.");
+        sb.AppendLine("The \"companyName\" field MUST contain ONLY the official name of the publicly traded entity — no parentheses, no eligibility notes, no qualifiers like \"(NOT ELIGIBLE)\", \"(private subsidiary)\", \"(publicly traded as X)\". If the directly-affected company is a private subsidiary, either return the clean name of its publicly traded parent (if the rationale genuinely applies to the parent) or omit the entry entirely — never explain the disqualification inside companyName.");
         sb.AppendLine("Maximum 5 companies per batch, only if you are certain they are publicly listed.");
         sb.AppendLine("For each company, the rationale MUST follow this format: \"[Specific regulation/signal] directly affects [company] because [specific business reason]. Unlike competitors, [company] is better positioned because [concrete differentiator].\"");
         sb.AppendLine("Each signal below is prefixed with its reference ID, e.g. \"[ID:123]\". For each company, \"signalCelexIds\" MUST list the exact reference ID(s) (as strings) of the signal(s) below that this pick is based on.");
         sb.AppendLine("Each company MUST also include a \"sentiment\" field, one of exactly: \"Bullish\" (the company is expected to benefit from the signal), \"Bearish\" (expected to lose or be threatened by it), or \"Neutral\" (affected, but the direction is unclear). This field is required, never omit it.");
-        sb.AppendLine("Do NOT include a ticker symbol — company tickers are resolved separately after analysis.");
+        sb.AppendLine("Include a \"tickerHint\" field with your best guess of the company's stock ticker symbol, if you are reasonably confident — this is NOT the final ticker, it is only used as a search hint for a separate verification step against real exchange data. Set it to null if you are not confident.");
         sb.AppendLine("Return strict JSON only, no preamble, matching this exact structure:");
-        sb.AppendLine("{ \"sectors\": [ { \"sector\": \"string\", \"score\": 0-100, \"trend\": \"Rising|Stable|Falling\", \"rationale\": \"string\" } ], \"companies\": [ { \"companyName\": \"string\", \"sector\": \"string\", \"score\": 0-100, \"rationale\": \"string\", \"sentiment\": \"Bullish|Bearish|Neutral\", \"signalCelexIds\": [\"string\"] } ] }");
+        sb.AppendLine("{ \"sectors\": [ { \"sector\": \"string\", \"score\": 0-100, \"trend\": \"Rising|Stable|Falling\", \"rationale\": \"string\" } ], \"companies\": [ { \"companyName\": \"string\", \"sector\": \"string\", \"score\": 0-100, \"rationale\": \"string\", \"sentiment\": \"Bullish|Bearish|Neutral\", \"tickerHint\": \"string|null\", \"signalCelexIds\": [\"string\"] } ] }");
         sb.AppendLine();
         sb.AppendLine("Signals:");
         foreach (var signal in batch)
@@ -307,6 +318,7 @@ public class AiAnalyzerService : IAiAnalyzerService
         public decimal Score { get; set; }
         public string? Rationale { get; set; }
         public string? Sentiment { get; set; }
+        public string? TickerHint { get; set; }
         public List<string>? SignalCelexIds { get; set; }
     }
 }

@@ -576,13 +576,17 @@ public class DataCollectorService : IDataCollectorService
     private sealed record TedNotice(string NoticeId, string Title, decimal? ValueEur, string? Country, DateTime PublishedAt, string? NoticeUrl);
 
     private const string OecdSource = "OECD";
-    private const string BudgetChangeSignalType = "BudgetChange";
-    // OECD.SDD.NAD, "Annual government deficit/surplus, revenue, expenditure and main aggregates IDC" (DF_TABLE12_IDC),
-    // filtered към FREQ=A, REF_SECTOR=S13 (General government), ACCOUNTING_ENTRY=B (Balancing item), STO=B9
-    // (Net lending/net borrowing) — истинско, проверено на живо government-deficit измерение. Няма quarterly
-    // еквивалент с sector breakdown в OECD SDMX (проверено): quarterly national accounts покриват само total economy.
-    private const string OecdApiUrl = "https://sdmx.oecd.org/public/rest/data/OECD.SDD.NAD,DSD_NASEC10_IDC@DF_TABLE12_IDC,1.0/A....S13...B.B9..........";
-    private const decimal SignificantChangePercent = 5m;
+    private const string CliTurningPointSignalType = "CliTurningPoint";
+    // OECD.SDD.STES, "Composite leading indicators" (DF_CLI) — амплитудно-коригиран (AA), месечен (M) индекс.
+    // 100 = дългосрочен тренд на растеж; CLI е проектиран да сигнализира обръщания на икономическия цикъл
+    // 4-8 месеца преди да се видят в реалните данни (BNP и т.н.) — точно "преди пазара" философията на системата.
+    // Старата DF_TABLE12_IDC (годишен government deficit/surplus) беше премахната: годишните данни не дават
+    // никакъв "нов" сигнал month-to-month. DF_CLI версия 4.0 връща празни observations на sdmx.oecd.org
+    // (маркирана "NonProductionDataflow") — 4.1 е активната версия, проверено на живо.
+    // Държавите покриват основните борси от Ticker Verification pipeline-а (US/UK/DE/FR/IT/ES/JP/CN).
+    private const string OecdCliCountries = "USA+DEU+FRA+GBR+JPN+CHN+ITA+ESP";
+    private const string OecdCliApiUrlBase = "https://sdmx.oecd.org/public/rest/data/OECD.SDD.STES,DSD_STES@DF_CLI,4.1/" + OecdCliCountries + ".M.LI...AA...";
+    private const decimal CliTrendThreshold = 100m;
 
     public async Task<int> CollectOecdSignalsAsync(CancellationToken cancellationToken = default)
     {
@@ -598,42 +602,37 @@ public class DataCollectorService : IDataCollectorService
         var collected = 0;
         try
         {
-            // Временно деактивирано: годишните OECD government-deficit данни се оказаха неподходящи за
-            // real-time signal detection (year-over-year сравнение на исторически годишни стойности създава
-            // шум, не действителни "нови" сигнали). Fetch/parse логиката отдолу (FetchOecdBudgetChangesAsync,
-            // ParseOecdSdmxJson, BuildOecdSeriesLabel) е запазена непокътната за бъдещо re-enable с по-подходящ
-            // dataset. Хвърляме веднага, за да падне в catch-а по-долу без да се пипа останалата логика.
-            throw new InvalidOperationException("OECD collector temporarily disabled - historical data not suitable for signal detection");
-#pragma warning disable CS0162 // Unreachable code detected — запазено непокътнато за бъдещо re-enable, виж коментара по-горе.
-
-            var changes = await FetchOecdBudgetChangesAsync(cancellationToken);
+            var crossings = await FetchOecdCliTurningPointsAsync(cancellationToken);
 
             var existingLinks = await _dbContext.Signals
                 .Where(s => s.Source == OecdSource)
                 .Select(s => s.SourceUrl)
                 .ToHashSetAsync(cancellationToken);
 
-            foreach (var change in changes)
+            foreach (var crossing in crossings)
             {
-                if (Math.Abs(change.PercentChange) < SignificantChangePercent || existingLinks.Contains(change.SourceUrl))
+                if (existingLinks.Contains(crossing.SourceUrl))
                 {
                     continue;
                 }
 
+                var direction = crossing.LatestValue >= CliTrendThreshold ? "above" : "below";
+                var outlook = crossing.LatestValue >= CliTrendThreshold ? "above-trend growth ahead" : "below-trend slowdown ahead";
+
                 _dbContext.Signals.Add(new Signal
                 {
                     Source = OecdSource,
-                    SignalType = BudgetChangeSignalType,
-                    SourceUrl = change.SourceUrl,
-                    Title = $"{change.SeriesLabel} general government balance: {change.PercentChange:+0.0;-0.0}% year-over-year",
-                    RawContent = $"Previous: {change.PreviousValue}; Latest: {change.LatestValue}; Period: {change.Period}",
+                    SignalType = CliTurningPointSignalType,
+                    SourceUrl = crossing.SourceUrl,
+                    Title = $"{crossing.CountryName} OECD Composite Leading Indicator crosses {direction} 100 — signals {outlook}",
+                    RawContent = $"Previous: {crossing.PreviousValue:F2} ({crossing.PreviousPeriod}); Latest: {crossing.LatestValue:F2} ({crossing.LatestPeriod})",
                     PublishedAt = DateTime.UtcNow,
                     CollectedAt = DateTime.UtcNow,
                     Processed = false,
                     RunLogId = runLog.Id
                 });
 
-                existingLinks.Add(change.SourceUrl);
+                existingLinks.Add(crossing.SourceUrl);
                 collected++;
             }
 
@@ -644,7 +643,7 @@ public class DataCollectorService : IDataCollectorService
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "OECD collector disabled");
+            _logger.LogWarning(ex, "OECD collector failed");
             runLog.Status = "Failed";
             runLog.ErrorMessage = ex.Message;
             runLog.CompletedAt = DateTime.UtcNow;
@@ -653,12 +652,16 @@ public class DataCollectorService : IDataCollectorService
         }
 
         return collected;
-#pragma warning restore CS0162
     }
 
-    private async Task<List<OecdBudgetChange>> FetchOecdBudgetChangesAsync(CancellationToken cancellationToken)
+    private async Task<List<OecdCliCrossing>> FetchOecdCliTurningPointsAsync(CancellationToken cancellationToken)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Get, OecdApiUrl);
+        // Последните 8 месеца стигат за previous/latest сравнение дори при държави с забавена публикация
+        // (напр. Китай често изостава 1-2 месеца спрямо US/EU).
+        var startPeriod = DateTime.UtcNow.AddMonths(-8).ToString("yyyy-MM", CultureInfo.InvariantCulture);
+        var url = $"{OecdCliApiUrlBase}?startPeriod={startPeriod}&dimensionAtObservation=AllDimensions";
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.Accept.ParseAdd("application/vnd.sdmx.data+json");
 
         using var response = await _httpClient.SendAsync(request, cancellationToken);
@@ -667,14 +670,17 @@ public class DataCollectorService : IDataCollectorService
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
         using var payload = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
 
-        return ParseOecdSdmxJson(payload, OecdApiUrl);
+        return ParseOecdCliCrossings(payload, url);
     }
 
-    private static List<OecdBudgetChange> ParseOecdSdmxJson(JsonDocument payload, string sourceUrl)
+    // dimensionAtObservation=AllDimensions връща плосък observations dictionary, ключуван с двоеточие-разделени
+    // индекси в реда на dimensions.observation (REF_AREA, FREQ, MEASURE, UNIT_MEASURE, ACTIVITY, ADJUSTMENT,
+    // TRANSFORMATION, TIME_HORIZ, METHODOLOGY, TIME_PERIOD) — само REF_AREA и TIME_PERIOD варират реално тук,
+    // защото останалите dimensions са constrained до по 1 стойност от заявката (LI/AA/M и т.н.).
+    private static List<OecdCliCrossing> ParseOecdCliCrossings(JsonDocument payload, string sourceUrl)
     {
-        var results = new List<OecdBudgetChange>();
+        var results = new List<OecdCliCrossing>();
 
-        // sdmx.oecd.org връща SDMX-JSON 2.0.0: реалният payload е под "data" (dataSets/structures), не directly на root.
         var root = payload.RootElement.GetProperty("data");
         var dataSets = root.GetProperty("dataSets");
         if (dataSets.GetArrayLength() == 0)
@@ -682,96 +688,127 @@ public class DataCollectorService : IDataCollectorService
             return results;
         }
 
-        // "structures" е масив (не единичен "structure" обект както в по-старата версия на схемата).
-        var dimensions = root.GetProperty("structures")[0].GetProperty("dimensions");
-        var seriesDimensions = dimensions.GetProperty("series");
-        var observationPeriods = dimensions.GetProperty("observation")[0].GetProperty("values")
-            .EnumerateArray()
-            .Select(v => v.GetProperty("id").GetString() ?? string.Empty)
-            .ToList();
+        var observationDims = root.GetProperty("structures")[0].GetProperty("dimensions").GetProperty("observation");
+        var refAreaPos = -1;
+        var timePeriodPos = -1;
+        JsonElement refAreaValues = default;
+        JsonElement timePeriodValues = default;
 
-        foreach (var series in dataSets[0].GetProperty("series").EnumerateObject())
+        for (var i = 0; i < observationDims.GetArrayLength(); i++)
         {
-            var observations = series.Value.GetProperty("observations").EnumerateObject()
-                .Where(o => o.Value[0].ValueKind == JsonValueKind.Number)
-                .Select(o => (Index: int.Parse(o.Name, CultureInfo.InvariantCulture), Value: o.Value[0].GetDecimal()))
-                .OrderBy(o => o.Index)
-                .ToList();
+            var dim = observationDims[i];
+            var id = dim.GetProperty("id").GetString();
+            if (id == "REF_AREA")
+            {
+                refAreaPos = i;
+                refAreaValues = dim.GetProperty("values");
+            }
+            else if (id == "TIME_PERIOD")
+            {
+                timePeriodPos = i;
+                timePeriodValues = dim.GetProperty("values");
+            }
+        }
 
-            if (observations.Count < 2)
+        if (refAreaPos < 0 || timePeriodPos < 0)
+        {
+            return results;
+        }
+
+        // country code -> list of (period, value), заредено от observations dictionary-я преди сортиране.
+        var byCountry = new Dictionary<string, List<(string Period, decimal Value)>>();
+        var countryNames = new Dictionary<string, string>();
+
+        if (!dataSets[0].TryGetProperty("observations", out var observations))
+        {
+            return results;
+        }
+
+        foreach (var obs in observations.EnumerateObject())
+        {
+            if (obs.Value[0].ValueKind != JsonValueKind.Number)
             {
                 continue;
             }
 
-            var previous = observations[^2];
-            var latest = observations[^1];
-            if (previous.Value == 0)
+            var indices = obs.Name.Split(':');
+            if (refAreaPos >= indices.Length || timePeriodPos >= indices.Length)
             {
                 continue;
             }
 
-            var percentChange = (latest.Value - previous.Value) / Math.Abs(previous.Value) * 100m;
-            var period = latest.Index < observationPeriods.Count ? observationPeriods[latest.Index] : latest.Index.ToString(CultureInfo.InvariantCulture);
+            if (!int.TryParse(indices[refAreaPos], out var refAreaIndex) || !int.TryParse(indices[timePeriodPos], out var timePeriodIndex))
+            {
+                continue;
+            }
 
-            results.Add(new OecdBudgetChange(
-                BuildOecdSeriesLabel(series.Name, seriesDimensions),
+            var countryElement = refAreaValues[refAreaIndex];
+            var countryCode = countryElement.GetProperty("id").GetString() ?? "?";
+            var countryName = countryElement.GetProperty("name").GetString() ?? countryCode;
+            var period = timePeriodValues[timePeriodIndex].GetProperty("id").GetString() ?? timePeriodIndex.ToString(CultureInfo.InvariantCulture);
+            var value = obs.Value[0].GetDecimal();
+
+            if (!byCountry.TryGetValue(countryCode, out var series))
+            {
+                series = [];
+                byCountry[countryCode] = series;
+            }
+
+            series.Add((period, value));
+            countryNames[countryCode] = countryName;
+        }
+
+        foreach (var (countryCode, series) in byCountry)
+        {
+            var ordered = series.OrderBy(s => s.Period, StringComparer.Ordinal).ToList();
+            if (ordered.Count < 2)
+            {
+                continue;
+            }
+
+            var previous = ordered[^2];
+            var latest = ordered[^1];
+
+            var crossedAbove = previous.Value < CliTrendThreshold && latest.Value >= CliTrendThreshold;
+            var crossedBelow = previous.Value >= CliTrendThreshold && latest.Value < CliTrendThreshold;
+            if (!crossedAbove && !crossedBelow)
+            {
+                continue;
+            }
+
+            results.Add(new OecdCliCrossing(
+                countryCode,
+                countryNames[countryCode],
                 previous.Value,
+                previous.Period,
                 latest.Value,
-                percentChange,
-                period,
-                $"{sourceUrl}#{series.Name}:{period}"));
+                latest.Period,
+                $"{sourceUrl}#{countryCode}:{latest.Period}"));
         }
 
         return results;
     }
 
-    // Заявката е закачена за един конкретен индикатор (general government net lending/borrowing) — единствената
-    // променлива координата по série е REF_AREA, затова label-ът е просто името на държавата, не dump на
-    // всичките 19 dimension-а от DSD (повечето от които "Not applicable" за тази заявка).
-    private static string BuildOecdSeriesLabel(string seriesKey, JsonElement seriesDimensions)
-    {
-        var indices = seriesKey.Split(':');
+    private sealed record OecdCliCrossing(string CountryCode, string CountryName, decimal PreviousValue, string PreviousPeriod, decimal LatestValue, string LatestPeriod, string SourceUrl);
 
-        for (var i = 0; i < seriesDimensions.GetArrayLength(); i++)
-        {
-            var dimension = seriesDimensions[i];
-            if (dimension.GetProperty("id").GetString() != "REF_AREA")
-            {
-                continue;
-            }
-
-            if (i >= indices.Length || !int.TryParse(indices[i], out var valueIndex))
-            {
-                break;
-            }
-
-            var values = dimension.GetProperty("values");
-            if (valueIndex >= 0 && valueIndex < values.GetArrayLength())
-            {
-                return values[valueIndex].GetProperty("name").GetString() ?? seriesKey;
-            }
-
-            break;
-        }
-
-        return seriesKey;
-    }
-
-    private sealed record OecdBudgetChange(string SeriesLabel, decimal PreviousValue, decimal LatestValue, decimal PercentChange, string Period, string SourceUrl);
-
-    private const string EsmaSource = "ESMA";
+    private const string AmfSource = "AMF-France";
     private const string ShortInterestDeclineSignalType = "ShortInterestDecline";
-    private const string EsmaCsvUrl = "https://www.esma.europa.eu/sites/default/files/library/ShortPositions.csv";
+    // ESMA-то си премести net-short-position данните към CAPTCHA-защитен registers портал (registers.esma.europa.eu) —
+    // потвърдено на живо (2026-08-05): и главната търсачка, и всеки export извикват captcha endpoint, автоматичен
+    // достъп е невъзможен без официален API ключ. Вместо pan-EU агрегатора минаваме на AMF France (National Competent
+    // Authority под същия EU Short Selling Regulation) — публикуват same-type net-short-position данни свободно през
+    // data.gouv.fr, без CAPTCHA, обновявано дневно. По-тесен обхват (само FR-листнати емитенти), но реален и работещ.
+    private const string AmfCsvUrl = "https://www.data.gouv.fr/api/1/datasets/r/c2539d1c-8531-4937-9cba-3bd8e9786cc5";
     private const decimal ShortInterestDeclineThresholdPoints = 1m;
-    private const string EsmaSnapshotPrefix = "ESMA_SNAPSHOT:";
+    private const string AmfSnapshotPrefix = "AMF_SNAPSHOT:";
 
-    public async Task<int> CollectEsmaSignalsAsync(CancellationToken cancellationToken = default)
+    public async Task<int> CollectAmfSignalsAsync(CancellationToken cancellationToken = default)
     {
         var runLog = new RunLog
         {
             StartedAt = DateTime.UtcNow,
             Status = "Running",
-            JobName = EsmaSource
+            JobName = AmfSource
         };
         _dbContext.RunLogs.Add(runLog);
         await _dbContext.SaveChangesAsync(cancellationToken);
@@ -779,21 +816,21 @@ public class DataCollectorService : IDataCollectorService
         var collected = 0;
         try
         {
-            var positions = await FetchEsmaShortPositionsAsync(cancellationToken);
+            var positions = await FetchAmfShortPositionsAsync(cancellationToken);
 
-            // ESMA публикува само текущ snapshot (не времеви редове), затова пазим предходния snapshot в RunLog.Notes,
+            // AMF файлът дава само текущ snapshot (не времеви редове), затова пазим предходния snapshot в RunLog.Notes,
             // за да можем да сравняваме спад спрямо предходния run — само декларираните спадове стават Signal записи.
             var previousRunLog = await _dbContext.RunLogs
-                .Where(r => r.Notes != null && r.Notes.StartsWith(EsmaSnapshotPrefix))
+                .Where(r => r.Notes != null && r.Notes.StartsWith(AmfSnapshotPrefix))
                 .OrderByDescending(r => r.StartedAt)
                 .FirstOrDefaultAsync(cancellationToken);
 
             var previousPercents = previousRunLog is not null
-                ? JsonSerializer.Deserialize<Dictionary<string, decimal>>(previousRunLog.Notes![EsmaSnapshotPrefix.Length..]) ?? new Dictionary<string, decimal>()
+                ? JsonSerializer.Deserialize<Dictionary<string, decimal>>(previousRunLog.Notes![AmfSnapshotPrefix.Length..]) ?? new Dictionary<string, decimal>()
                 : new Dictionary<string, decimal>();
 
             var existingLinks = await _dbContext.Signals
-                .Where(s => s.Source == EsmaSource)
+                .Where(s => s.Source == AmfSource)
                 .Select(s => s.SourceUrl)
                 .ToHashSetAsync(cancellationToken);
 
@@ -805,7 +842,7 @@ public class DataCollectorService : IDataCollectorService
                 }
 
                 var decline = previousPercent - position.NetShortPositionPercent;
-                var sourceUrl = $"{EsmaCsvUrl}#{position.Isin}:{position.PositionDate:yyyy-MM-dd}";
+                var sourceUrl = $"{AmfCsvUrl}#{position.Isin}:{position.PositionDate:yyyy-MM-dd}";
                 if (decline <= ShortInterestDeclineThresholdPoints || existingLinks.Contains(sourceUrl))
                 {
                     continue;
@@ -813,7 +850,7 @@ public class DataCollectorService : IDataCollectorService
 
                 _dbContext.Signals.Add(new Signal
                 {
-                    Source = EsmaSource,
+                    Source = AmfSource,
                     SignalType = ShortInterestDeclineSignalType,
                     SourceUrl = sourceUrl,
                     Title = $"{position.IssuerName} short interest fell {decline:0.0} pts",
@@ -832,18 +869,14 @@ public class DataCollectorService : IDataCollectorService
             runLog.Status = "Completed";
             runLog.SignalsCollected = collected;
             runLog.CompletedAt = DateTime.UtcNow;
-            runLog.Notes = EsmaSnapshotPrefix + JsonSerializer.Serialize(positions.ToDictionary(p => p.Isin, p => p.NetShortPositionPercent));
+            runLog.Notes = AmfSnapshotPrefix + JsonSerializer.Serialize(positions.ToDictionary(p => p.Isin, p => p.NetShortPositionPercent));
             await _dbContext.SaveChangesAsync(cancellationToken);
         }
         catch (Exception ex)
         {
-            // ESMA премести net-short-position данните към CAPTCHA-защитен registers портал —
-            // автоматичен достъп вече не е възможен без официален API ключ. Логваме и продължаваме
-            // (не хвърляме), за да не блокираме останалите collector-и/Hangfire retry-и.
-            // Fetch/parse логиката по-долу е запазена за когато се появи алтернативен endpoint.
-            _logger.LogWarning(ex, "ESMA endpoint unavailable");
+            _logger.LogWarning(ex, "AMF collector failed");
             runLog.Status = "Failed";
-            runLog.ErrorMessage = "ESMA endpoint unavailable";
+            runLog.ErrorMessage = ex.Message;
             runLog.CompletedAt = DateTime.UtcNow;
             await _dbContext.SaveChangesAsync(cancellationToken);
             return 0;
@@ -852,66 +885,89 @@ public class DataCollectorService : IDataCollectorService
         return collected;
     }
 
-    private async Task<List<EsmaShortPosition>> FetchEsmaShortPositionsAsync(CancellationToken cancellationToken)
+    private async Task<List<AmfShortPosition>> FetchAmfShortPositionsAsync(CancellationToken cancellationToken)
     {
-        var csv = await _httpClient.GetStringAsync(EsmaCsvUrl, cancellationToken);
+        var csv = await _httpClient.GetStringAsync(AmfCsvUrl, cancellationToken);
         var lines = csv.Split('\n', StringSplitOptions.RemoveEmptyEntries);
         if (lines.Length < 2)
         {
             return [];
         }
 
-        var headers = SplitCsvLine(lines[0]);
-        var issuerIndex = FindColumnIndex(headers, "issuer", "name of the issuer", "issuer name");
-        var isinIndex = FindColumnIndex(headers, "isin", "isin code");
-        var dateIndex = FindColumnIndex(headers, "position date", "date");
-        var percentIndex = FindColumnIndex(headers, "net short position", "net short position (%)", "position (%)");
+        var headers = SplitCsvLine(lines[0], ';');
+        var holderIndex = FindColumnIndex(headers, "Detenteur de la position courte nette");
+        var issuerIndex = FindColumnIndex(headers, "Emetteur / issuer");
+        var isinIndex = FindColumnIndex(headers, "code ISIN");
+        var dateIndex = FindColumnIndex(headers, "Date de debut position");
+        var percentIndex = FindColumnIndex(headers, "Ratio");
+        // Празна "Date de fin de publication position" означава позицията никога не е затваряна, НЕ че редът е
+        // последният/актуалният — файлът е пълен history log, всяка промяна на ratio-то е отделен ред без end-date,
+        // само пълно затваряне на позицията слага end-date. Затова взимаме само реда с най-скорошна
+        // "Date de debut position" за всяка двойка (holder, ISIN) — иначе стари редове се събират многократно
+        // (потвърдено на живо: FORVIA излизаше 323% заради 4 стари реда на един и същ holder).
+        var endDateIndex = FindColumnIndex(headers, "Date de fin de publication position");
 
-        if (isinIndex < 0 || percentIndex < 0)
+        if (holderIndex < 0 || isinIndex < 0 || percentIndex < 0 || dateIndex < 0 || endDateIndex < 0)
         {
             return [];
         }
 
-        var byIsin = new Dictionary<string, (string IssuerName, DateTime PositionDate, decimal Percent)>();
+        var latestByHolderIsin = new Dictionary<(string Holder, string Isin), (string IssuerName, DateTime PositionDate, decimal Percent, bool StillOpen)>();
 
         foreach (var line in lines.Skip(1))
         {
-            var fields = SplitCsvLine(line);
-            if (fields.Count <= percentIndex || fields.Count <= isinIndex)
+            var fields = SplitCsvLine(line, ';');
+            if (fields.Count <= percentIndex || fields.Count <= isinIndex || fields.Count <= endDateIndex || fields.Count <= holderIndex)
             {
                 continue;
             }
 
             var isin = fields[isinIndex].Trim();
-            if (string.IsNullOrWhiteSpace(isin))
+            var holder = fields[holderIndex].Trim();
+            if (string.IsNullOrWhiteSpace(isin) || string.IsNullOrWhiteSpace(holder))
+            {
+                continue;
+            }
+
+            if (!DateTime.TryParse(fields[dateIndex], CultureInfo.InvariantCulture, DateTimeStyles.None, out var positionDate))
+            {
+                continue;
+            }
+
+            var key = (holder, isin);
+            if (latestByHolderIsin.TryGetValue(key, out var existing) && existing.PositionDate >= positionDate)
             {
                 continue;
             }
 
             var issuerName = issuerIndex >= 0 && issuerIndex < fields.Count ? fields[issuerIndex].Trim() : isin;
             var percent = ParseDecimal(fields[percentIndex]);
-            var positionDate = dateIndex >= 0 && dateIndex < fields.Count &&
-                DateTime.TryParse(fields[dateIndex], CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsedDate)
-                ? parsedDate
-                : DateTime.UtcNow.Date;
+            var stillOpen = string.IsNullOrWhiteSpace(fields[endDateIndex]);
 
+            latestByHolderIsin[key] = (issuerName, positionDate, percent, stillOpen);
+        }
+
+        var byIsin = new Dictionary<string, (string IssuerName, DateTime PositionDate, decimal Percent)>();
+
+        foreach (var ((_, isin), entry) in latestByHolderIsin.Where(kvp => kvp.Value.StillOpen))
+        {
             if (byIsin.TryGetValue(isin, out var existing))
             {
-                byIsin[isin] = (existing.IssuerName, positionDate > existing.PositionDate ? positionDate : existing.PositionDate, existing.Percent + percent);
+                byIsin[isin] = (existing.IssuerName, entry.PositionDate > existing.PositionDate ? entry.PositionDate : existing.PositionDate, existing.Percent + entry.Percent);
             }
             else
             {
-                byIsin[isin] = (issuerName, positionDate, percent);
+                byIsin[isin] = (entry.IssuerName, entry.PositionDate, entry.Percent);
             }
         }
 
-        return byIsin.Select(kvp => new EsmaShortPosition(kvp.Value.IssuerName, kvp.Key, kvp.Value.PositionDate, kvp.Value.Percent)).ToList();
+        return byIsin.Select(kvp => new AmfShortPosition(kvp.Value.IssuerName, kvp.Key, kvp.Value.PositionDate, kvp.Value.Percent)).ToList();
     }
 
     private static int FindColumnIndex(List<string> headers, params string[] candidates) =>
         headers.FindIndex(h => candidates.Any(c => string.Equals(h.Trim(), c, StringComparison.OrdinalIgnoreCase)));
 
-    private static List<string> SplitCsvLine(string line)
+    private static List<string> SplitCsvLine(string line, char delimiter = ',')
     {
         var fields = new List<string>();
         var current = new StringBuilder();
@@ -923,7 +979,7 @@ public class DataCollectorService : IDataCollectorService
             {
                 inQuotes = !inQuotes;
             }
-            else if (c == ',' && !inQuotes)
+            else if (c == delimiter && !inQuotes)
             {
                 fields.Add(current.ToString());
                 current.Clear();
@@ -938,7 +994,7 @@ public class DataCollectorService : IDataCollectorService
         return fields;
     }
 
-    private sealed record EsmaShortPosition(string IssuerName, string Isin, DateTime PositionDate, decimal NetShortPositionPercent);
+    private sealed record AmfShortPosition(string IssuerName, string Isin, DateTime PositionDate, decimal NetShortPositionPercent);
 
     private const string SecEdgar13DGSource = "SEC-EDGAR-13DG";
     private const string MajorAcquisitionSignalType = "MajorAcquisition";
@@ -1128,4 +1184,128 @@ public class DataCollectorService : IDataCollectorService
     private sealed record SecEdgar13DGFilingRef(string IndexUrl, string FormType);
 
     private sealed record SecEdgar13DGFiling(string IssuerName, string FilerName, decimal? PercentAcquired, DateTime FiledDate, string FormType);
+
+    private const string EpParliamentSource = "EP-Parliament";
+    private const string PreLegislativeSignalType = "PreLegislative";
+    // EP Open Data API v2 — свободен достъп, без ключ, лимит 500 заявки/5мин (виж openapi спецификацията на
+    // https://data.europarl.europa.eu/api/v2/). Този feed връща draft committee reports/opinions, публикувани
+    // или обновени през последния месец — комисиите изготвят тези документи МЕСЕЦИ преди финалното приемане и
+    // публикуване в EUR-Lex Official Journal, затова е най-ранният сигнал в системата за предстоящо законодателство.
+    private const string EpCommitteeFeedUrl = "https://data.europarl.europa.eu/api/v2/committee-documents/feed";
+    // User-Agent-ът е формално по избор в EP-ската OpenAPI спецификация, но заявка без него връща 403 —
+    // потвърдено на живо (2026-08-05). Форматът следва препоръчания в спецификацията "{user-id}-{env}-{version}".
+    private const string EpParliamentUserAgent = "EarlySignalSystem-dev-1.0.0";
+
+    public async Task<int> CollectEpParliamentSignalsAsync(CancellationToken cancellationToken = default)
+    {
+        var runLog = new RunLog
+        {
+            StartedAt = DateTime.UtcNow,
+            Status = "Running",
+            JobName = EpParliamentSource
+        };
+        _dbContext.RunLogs.Add(runLog);
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
+        var collected = 0;
+        try
+        {
+            var items = await FetchEpCommitteeFeedItemsAsync(cancellationToken);
+
+            var existingLinks = await _dbContext.Signals
+                .Where(s => s.Source == EpParliamentSource)
+                .Select(s => s.SourceUrl)
+                .ToHashSetAsync(cancellationToken);
+
+            foreach (var item in items)
+            {
+                if (existingLinks.Contains(item.Link))
+                {
+                    continue;
+                }
+
+                _dbContext.Signals.Add(new Signal
+                {
+                    Source = EpParliamentSource,
+                    SignalType = PreLegislativeSignalType,
+                    SourceUrl = item.Link,
+                    Title = string.IsNullOrWhiteSpace(item.CommitteeCode) ? item.Title : $"[{item.CommitteeCode}] {item.Title}",
+                    RawContent = item.DocumentTypeLabel,
+                    PublishedAt = item.UpdatedAt,
+                    CollectedAt = DateTime.UtcNow,
+                    Processed = false,
+                    RunLogId = runLog.Id
+                });
+
+                existingLinks.Add(item.Link);
+                collected++;
+            }
+
+            runLog.Status = "Completed";
+            runLog.SignalsCollected = collected;
+            runLog.CompletedAt = DateTime.UtcNow;
+            await _dbContext.SaveChangesAsync(cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to collect EP Parliament signals");
+            runLog.Status = "Failed";
+            runLog.ErrorMessage = ex.Message;
+            runLog.CompletedAt = DateTime.UtcNow;
+            await _dbContext.SaveChangesAsync(cancellationToken);
+            throw;
+        }
+
+        return collected;
+    }
+
+    private async Task<List<EpCommitteeFeedItem>> FetchEpCommitteeFeedItemsAsync(CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, EpCommitteeFeedUrl);
+        request.Headers.Accept.ParseAdd("application/atom+xml");
+        request.Headers.TryAddWithoutValidation("User-Agent", EpParliamentUserAgent);
+
+        using var response = await _httpClient.SendAsync(request, cancellationToken);
+        response.EnsureSuccessStatusCode();
+
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        var document = await XDocument.LoadAsync(stream, LoadOptions.None, cancellationToken);
+
+        XNamespace atom = "http://www.w3.org/2005/Atom";
+        var items = new List<EpCommitteeFeedItem>();
+
+        foreach (var entry in document.Descendants(atom + "entry"))
+        {
+            var title = entry.Element(atom + "title")?.Value.Trim();
+            // <id> е постоянен, dereferenceable URI към документа (напр. .../eli/dl/doc/ECON-PR-778137) —
+            // ползваме го и като SourceUrl за dedup, и като линк, вместо rel="alternate" (сочи към суровия API endpoint).
+            var link = entry.Element(atom + "id")?.Value.Trim();
+
+            if (string.IsNullOrWhiteSpace(title) || string.IsNullOrWhiteSpace(link))
+            {
+                continue;
+            }
+
+            var documentTypeLabel = entry.Element(atom + "category")?.Attribute("label")?.Value;
+
+            var updatedRaw = entry.Element(atom + "updated")?.Value;
+            var updatedAt = DateTime.UtcNow;
+            if (!string.IsNullOrWhiteSpace(updatedRaw) &&
+                DateTimeOffset.TryParse(updatedRaw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsed))
+            {
+                updatedAt = parsed.UtcDateTime;
+            }
+
+            // Документ ID-тата следват "<COMMITTEE_CODE>-<TYPE>-<NUMBER>" формат (напр. "ECON-PR-778137") —
+            // комитетският код е полезен контекст в Title-а без да викаме отделен endpoint за пълните имена.
+            var identifier = link[(link.LastIndexOf('/') + 1)..];
+            var committeeCode = identifier.Contains('-') ? identifier[..identifier.IndexOf('-')] : string.Empty;
+
+            items.Add(new EpCommitteeFeedItem(title, link, documentTypeLabel, committeeCode, updatedAt));
+        }
+
+        return items;
+    }
+
+    private sealed record EpCommitteeFeedItem(string Title, string Link, string? DocumentTypeLabel, string CommitteeCode, DateTime UpdatedAt);
 }

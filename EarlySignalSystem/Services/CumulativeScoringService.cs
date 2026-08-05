@@ -77,6 +77,13 @@ public class CumulativeScoringService : ICumulativeScoringService
             .Where(p => p.PickedAt >= windowStart)
             .ToListAsync(cancellationToken);
 
+        // CompanyPick.Ticker е снимка от момента на създаване (почти винаги null — AI Analyzer-ът
+        // създава Company с Ticker = null и TickerVerificationService го попълва по-късно, но никога
+        // не се връща да update-не вече записаните CompanyPicks). Затова взимаме актуалния тикер тук,
+        // директно от Companies таблицата, вместо да разчитаме на замразената стойност в picks.
+        var currentTickers = await _dbContext.Companies
+            .ToDictionaryAsync(c => c.CompanyName, c => c.Ticker, StringComparer.OrdinalIgnoreCase, cancellationToken);
+
         var scores = new List<CumulativeScore>();
 
         // Пазим последния (по PickedAt) CompanyPick на всяка компания, за да вземем Sentiment/Rationale
@@ -87,7 +94,7 @@ public class CumulativeScoringService : ICumulativeScoringService
         // през CompanyPickSignals -> Signals за всяка компания по-долу.
         var allPicksByCompany = new Dictionary<CumulativeScore, List<CompanyPick>>();
 
-        foreach (var group in picks.GroupBy(p => new { p.CompanyName, p.Ticker }))
+        foreach (var group in picks.GroupBy(p => p.CompanyName))
         {
             var companyPicks = group.ToList();
             var signalCount = companyPicks.Count;
@@ -143,8 +150,8 @@ public class CumulativeScoringService : ICumulativeScoringService
 
             var score = new CumulativeScore
             {
-                Ticker = group.Key.Ticker,
-                CompanyName = group.Key.CompanyName,
+                Ticker = currentTickers.TryGetValue(group.Key, out var currentTicker) ? currentTicker : null,
+                CompanyName = group.Key,
                 Sector = latestPick.Sector,
                 Score = Math.Clamp(normalizedScore, 0m, 100m),
                 SignalCount = signalCount,

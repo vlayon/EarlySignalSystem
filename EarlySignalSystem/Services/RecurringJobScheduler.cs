@@ -12,6 +12,11 @@ public static class RecurringJobScheduler
             "0 18 * * *");
 
         RecurringJob.AddOrUpdate<IDataCollectorService>(
+            "ep-parliament-collector",
+            service => service.CollectEpParliamentSignalsAsync(CancellationToken.None),
+            "5 18 * * *");
+
+        RecurringJob.AddOrUpdate<IDataCollectorService>(
             "sec-edgar-collector",
             service => service.CollectSecEdgarSignalsAsync(CancellationToken.None),
             "10 18 * * *");
@@ -26,13 +31,14 @@ public static class RecurringJobScheduler
             service => service.CollectTedSignalsAsync(CancellationToken.None),
             "15 18 * * *");
 
-        // oecd-collector е временно деактивиран — историческите (годишни) OECD данни не са подходящи
-        // за real-time signal detection. Виж CollectOecdSignalsAsync в DataCollectorService.cs.
-        RecurringJob.RemoveIfExists("oecd-collector");
+        RecurringJob.AddOrUpdate<IDataCollectorService>(
+            "oecd-collector",
+            service => service.CollectOecdSignalsAsync(CancellationToken.None),
+            "20 18 * * *");
 
         RecurringJob.AddOrUpdate<IDataCollectorService>(
-            "esma-collector",
-            service => service.CollectEsmaSignalsAsync(CancellationToken.None),
+            "amf-collector",
+            service => service.CollectAmfSignalsAsync(CancellationToken.None),
             "25 18 * * *");
 
         RecurringJob.AddOrUpdate<IAiAnalyzerService>(
@@ -70,6 +76,11 @@ public static class RecurringJobScheduler
             $"0 18 {dayMonth} *");
 
         RecurringJob.AddOrUpdate<IDataCollectorService>(
+            "ep-parliament-collector",
+            service => service.CollectEpParliamentSignalsAsync(CancellationToken.None),
+            $"5 18 {dayMonth} *");
+
+        RecurringJob.AddOrUpdate<IDataCollectorService>(
             "sec-edgar-collector",
             service => service.CollectSecEdgarSignalsAsync(CancellationToken.None),
             $"10 18 {dayMonth} *");
@@ -85,8 +96,13 @@ public static class RecurringJobScheduler
             $"15 18 {dayMonth} *");
 
         RecurringJob.AddOrUpdate<IDataCollectorService>(
-            "esma-collector",
-            service => service.CollectEsmaSignalsAsync(CancellationToken.None),
+            "oecd-collector",
+            service => service.CollectOecdSignalsAsync(CancellationToken.None),
+            $"20 18 {dayMonth} *");
+
+        RecurringJob.AddOrUpdate<IDataCollectorService>(
+            "amf-collector",
+            service => service.CollectAmfSignalsAsync(CancellationToken.None),
             $"25 18 {dayMonth} *");
 
         RecurringJob.AddOrUpdate<IAiAnalyzerService>(

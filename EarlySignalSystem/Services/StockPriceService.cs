@@ -12,6 +12,7 @@ public class StockPriceService : IStockPriceService
 
     private readonly HttpClient _httpClient;
     private readonly IConfiguration _configuration;
+    private readonly IYahooFinanceService _yahooFinanceService;
     private readonly ILogger<StockPriceService> _logger;
 
     // Кешираме целия daily time series по тикер (не по ticker+дата) — GetClosingPriceAsync и
@@ -23,10 +24,11 @@ public class StockPriceService : IStockPriceService
     // за rate limiting пада само между отделни HTTP заявки, не и преди самата първа.
     private bool _hasMadeRequest;
 
-    public StockPriceService(HttpClient httpClient, IConfiguration configuration, ILogger<StockPriceService> logger)
+    public StockPriceService(HttpClient httpClient, IConfiguration configuration, IYahooFinanceService yahooFinanceService, ILogger<StockPriceService> logger)
     {
         _httpClient = httpClient;
         _configuration = configuration;
+        _yahooFinanceService = yahooFinanceService;
         _logger = logger;
     }
 
@@ -72,6 +74,15 @@ public class StockPriceService : IStockPriceService
         if (_seriesCache.TryGetValue(ticker, out var cached))
         {
             return cached;
+        }
+
+        // Yahoo Finance е първичният източник — свободен, без ключ, без документиран дневен лимит.
+        // Alpha Vantage остава fallback само за тикъри, които Yahoo не разпознава (виж YahooFinanceService).
+        var yahooSeries = await _yahooFinanceService.GetDailyClosesAsync(ticker, cancellationToken);
+        if (yahooSeries is not null)
+        {
+            _seriesCache[ticker] = yahooSeries;
+            return yahooSeries;
         }
 
         var apiKey = _configuration["AlphaVantage:ApiKey"];

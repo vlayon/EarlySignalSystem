@@ -4,7 +4,7 @@
 - .NET 9, C#
 - EF Core + SQL Server (LocalDB за dev)
 - Hangfire за scheduled jobs
-- Anthropic Claude API за AI анализ (claude-haiku-4-5) — изисква `ANTHROPIC_API_KEY` от environment
+- Anthropic Claude API за AI анализ — AI Analyzer ползва claude-sonnet-5, Technical Assessor (OverboughtOversoldService) все още ползва claude-haiku-4-5 — изисква `Anthropic:ApiKey` (env var `Anthropic__ApiKey`)
 - Alpha Vantage API за stock prices — изисква `AlphaVantage:ApiKey` от `appsettings.Development.json`
 - MudBlazor v9.6.0 за UI компоненти (Blazor Web App)
 - MAUI Hybrid shell — планиран за по-късно (мобилни приложения)
@@ -56,15 +56,16 @@ AI-powered инвестиционен скенер с дългосрочен х�
 | Job | Cron | Описание | Статус |
 |-----|------|----------|--------|
 | eur-lex-data-collector | 18:00 | EU Official Journal RSS | ✅ Работи |
+| ep-parliament-collector | 18:05 | Draft committee доклади/становища (EP Open Data API) | ✅ Работи (виж по-долу) |
 | sec-edgar-collector | 18:10 | Form 4 insider buying | ✅ Работи (0 покупки засега) |
 | sec-edgar-13dg-collector | 18:12 | 13D/13G >5% придобивания | ✅ Работи |
 | ted-collector | 18:15 | EU обществени поръчки | ✅ Работи |
-| esma-collector | 18:25 | Short selling register | ⚠️ Активен, но неуспешен (CAPTCHA блокира endpoint-а) |
+| oecd-collector | 18:20 | OECD Composite Leading Indicator (месечен turning-point сигнал по държави) | ✅ Работи (виж по-долу) |
+| amf-collector | 18:25 | Short selling register (AMF France, замества ESMA) | ✅ Работи (виж по-долу) |
 | ai-signal-analyzer | 18:30 | Claude API анализ | ✅ Работи |
 | cumulative-scorer | 19:00 | Scoring engine | ✅ Работи |
 | technical-assessor | 19:15 | Overbought/Oversold | ✅ Работи |
 | ticker-verifier | 20:00 | Alpha Vantage ticker lookup | ✅ Работи |
-| oecd-collector | — | Бюджетни данни | ❌ Деактивиран (исторически данни) |
 
 ## Scoring логика
 Компания влиза в CumulativeScores ако:
@@ -83,20 +84,32 @@ Ordering на топ 5 (Shortlist):
 3. FirstSignalDate DESC (по-нова = по-добре)
 
 ## Ticker Verification логика
-Alpha Vantage SYMBOL_SEARCH с предпочитани борси:
-1. NYSE, NASDAQ (United States)
-2. XETRA, Frankfurt (Germany)
-3. London Stock Exchange (United Kingdom)
-4. Euronext (France, Netherlands, Belgium)
-5. Borsa Italiana (Italy)
-6. Madrid Stock Exchange (Spain)
-7. Други европейски
-8. Всички останали (Индия, Бразилия, OTC) → НЕ приемай
+4-degrees pipeline, всяко ниво се пробва само ако предишното не намери нищо:
+1. **SEC** (`company_tickers.json`) — безплатно, без ключ, без rate limit. Само US-listed компании. OTC ADR/foreign-ordinary тикъри (5 букви, завършващи на Y/F) се пазят отделно като last-resort fallback (стъпка 4), не се приемат директно тук.
+2. **Alpha Vantage** SYMBOL_SEARCH — пробва се първо по `TickerHint` (ако AI Analyzer-ът е дал такъв), после по CompanyName. Предпочитани борси по ранг: NYSE/NASDAQ → XETRA/Frankfurt → London → Euronext (Paris/Amsterdam/Brussels) → Milan → Madrid → други европейски. OTC-suffix тикъри се приемат само като last-resort (по-лош ранг от всяка истинска борса). 25 заявки/ден общо (споделено и с RSI/MACD/цени) — тесното място.
+3. **OpenFIGI** — много по-широко глобално покритие от AV, 5 заявки/мин без ключ (20/мин с `OpenFigi:ApiKey`, опционален).
+4. **Fallback**: SEC OTC тикър (ако има) → директно `TickerHint` от AI Analyzer-а, маркиран `Exchange = "AI suggested (unverified)"` → ако нищо: `TickerVerified = true`, `Ticker = null` (UI показва "No ticker found", опашката не блокира вечно).
 
-Обработва максимум 15 компании на run за да пести 25 заявки/ден квотата.
+Обработва максимум 15 компании на run (SEC/OpenFIGI fallback стъпките не пипат AV квотата).
+
+## EP Parliament Collector логика
+Извиква EP Open Data API v2 (`data.europarl.europa.eu/api/v2/committee-documents/feed`) — свободен достъп, без ключ, лимит 500 заявки/5мин. Feed-ът връща Atom записи за draft committee доклади/становища, публикувани или обновени през последния месец.
+Това е най-ранният сигнал в системата: комисиите изготвят тези draft документи МЕСЕЦИ преди финалното приемане и публикуване в EUR-Lex Official Journal (който хваща само финалното, вече прието законодателство).
+Title-ът включва committee код-префикс (напр. `[ECON]`, `[ITRE]`), извлечен от document ID-то, без нужда от отделен lookup endpoint.
+**Важно**: заявката изисква `User-Agent` header — технически "по избор" в OpenAPI спецификацията, но без него API-то връща 403 (потвърдено на живо, 2026-08-05).
+
+## AMF Collector логика (замества ESMA)
+ESMA премести собствения си net-short-position регистър зад CAPTCHA-защитен портал (registers.esma.europa.eu) — потвърдено на живо (2026-08-05), и главната търсачка, и всеки export вика captcha endpoint. Bypass-ване на CAPTCHA е забранено.
+Вместо pan-EU агрегатора минахме на **AMF France** (Autorité des marchés financiers — National Competent Authority под същия EU Short Selling Regulation) — публикуват свободно, без CAPTCHA, дневно обновяван CSV през data.gouv.fr: `https://www.data.gouv.fr/api/1/datasets/r/c2539d1c-8531-4937-9cba-3bd8e9786cc5`.
+По-тесен обхват от преди (само FR-листнати емитенти вместо целия ЕС), но реален и работещ източник.
+Файлът е пълен history log (всяка промяна на ratio-то е отделен ред), не текущ snapshot — затова взимаме само реда с най-скорошна "Date de debut position" за всяка двойка (holder, ISIN) и филтрираме по празна "Date de fin de publication position" (= позицията още не е затворена). Инак стари редове се сумират многократно (открито на живо: FORVIA излизаше 323% вместо реалните 4.6%).
+
+## OECD Collector логика
+Извиква OECD SDMX API (`OECD.SDD.STES,DSD_STES@DF_CLI,4.1` — Composite Leading Indicator, амплитудно-коригиран, месечен) за 8 държави (US/DE/FR/UK/JP/CN/IT/ES, покриващи основните борси от Ticker Verification pipeline-а). CLI = 100 е дългосрочният тренд; индикаторът е проектиран да сигнализира обръщания на цикъла 4-8 месеца преди да се видят в реалните икономически данни.
+Сигнал се генерира само когато последната месечна стойност пресече прага от 100 спрямо предходния месец (нагоре или надолу) — не при всяко малко колебание, за да няма шум. `DF_CLI` версия 4.0 връща празни данни на sdmx.oecd.org (маркирана `NonProductionDataflow`) — 4.1 е активната версия, проверено на живо (2026-08-05).
 
 ## AI Analyzer конвенции
-- Model: claude-haiku-4-5
+- Model: claude-sonnet-5 (сменен от claude-haiku-4-5 — по-добро instruction-following при отхвърляне на частни/нереални компании, разликата в разход е пренебрежима при текущия обем)
 - Batch size: 15 сигнала
 - Prompt изисква: реални публично търгувани компании на NYSE/NASDAQ/LSE/XETRA/Euronext
 - НЕ приема: категории, правителствени агенции, частни subsidiary-та, описания
@@ -107,10 +120,12 @@ Alpha Vantage SYMBOL_SEARCH с предпочитани борси:
 ## UI страници
 - / (Home) — Quick Shortlist (топ 3) + Sector cards
 - /shortlist — Пълен shortlist топ 5 с детайли
-- /history — Дневни snapshots на shortlist-а (групирани по дата)
 - /insiders — SEC EDGAR Form 4 insider покупки
-- /technical — Canal статус + scan история
+- /history — Дневни snapshots на shortlist-а (групирани по дата)
+- /technical — линкнат като "Dashboard" в header-а (не в sidebar-а), Pipeline Stages (4 stage-card-а: Signal Collection → AI Analysis → Scoring & Shortlisting → Enrichment, всеки съдържа вложени job card-ове) + scan история
 - /hangfire — Hangfire dashboard
+
+Sidebar ред: Home → Shortlist → Insiders → History → бутон "Scan Now". "Dashboard" (/technical) е в header-а горе вдясно, преди "About", не в sidebar-а.
 
 ## Scan Now бутон
 Изложен през `POST /api/scan-now`, който отвътре ползва `IBackgroundJobClient` (не директно enqueue-нат от UI).
@@ -118,27 +133,26 @@ Alpha Vantage SYMBOL_SEARCH с предпочитани борси:
 15-минутен safety-net release при failed chain.
 
 ## Известни проблеми (предстои поправка)
-1. "Companies: 0" в Scan History таблицата — грешна логика за броене
-2. Дата без час в Scan History — трябва дата + час в local timezone
-3. UI scroll бъг — съдържанието в долната част е отрязано
-4. Tooltip на Velocity chip — липсва обяснение на логиката
-5. Tooltip на Source Types chip — трябва "X/5 типа" с имена при hover
-6. Цени на картите — Alpha Vantage имплементиран но тикерите са NULL за повечето компании
-7. Overbought/Oversold badge — зависи от цените, засега не се показва
+1. Overbought/Oversold badge — зависи от цените, засега не се показва
+
+## Решени проблеми (за история)
+- "Companies: 0" в Scan History — проверено (2026-08-05): логиката е коректна,брои легитимно нулеви резултати, не бъг
+- UI scroll бъг — проверено (2026-08-05) на 3 viewport размера (Shortlist + Technical), скролва нормално навсякъде, вероятно поправено странично от render mode фикса
+- Tooltip на Velocity/Source Types chip-овете — добавени (Shortlist.razor, Home.razor), Source Types показва реалните имена на типовете сигнали при hover
+- Дата без час в Scan History — оправено, вече показва дата + час в local timezone (виж `Extensions/DateTimeExtensions.cs`)
+- NULL тикери — 4-degree pipeline (SEC → Alpha Vantage → OpenFIGI → AI hint fallback), виж секция "Ticker Verification логика"
+- Цени на shortlist картите — First/Latest signal @ price + ▲/▼ % добавени и на Shortlist.razor, и на Home.razor Quick Shortlist картите (2026-08-05)
+- AI Analyzer връщаше companyName замърсен с дисквалифициращи бележки (напр. "Kemin Industries (private equity backed - NOT ELIGIBLE)") — промптът вече изрично забранява паренетични бележки в companyName; добавен е и defense-in-depth филтър, който прескача picks с "NOT ELIGIBLE" в името (2026-08-05)
+- OECD collector — преминат от годишни government-deficit данни (безполезни, шум) на месечен Composite Leading Indicator turning-point detector, виж "OECD Collector логика"; тествано на живо, засече реален turning point за Италия (2026-08-05)
+- ESMA collector — регистърът на ESMA-то е зад CAPTCHA (потвърдено, не bypass-ваме); заменен с AMF France, виж "AMF Collector логика"; тествано на живо, включително корекция на holder-history агрегационен бъг (2026-08-05)
+- Нов EP Parliament collector — draft committee доклади/становища, месеци преди EUR-Lex публикация; виж "EP Parliament Collector логика"; тествано на живо, 279 реални сигнала при първия run (2026-08-05)
 
 ## Предстои да се имплементира
 ### Data
-- OECD поправка — намери актуален endpoint за текущи бюджетни данни (не исторически)
-- ESMA алтернатива — намери endpoint без CAPTCHA за short selling данни
-- EU Parliament комитети — pre-legislative сигнали (много ранни)
 - Late Detection checks — price reaction, volume spike, media coverage
 
 ### UI
-- Цени на shortlist картите: FirstSignalDate @ $XX.XX, Latest: $XX.XX, ▲/▼ X.X%
 - Overbought/Oversold badge с reason tooltip
-- Tooltips на chips
-- Timezone fix
-- Scroll fix
 - History страница — разпъване при клик работи, но History е празна (нужни са дни данни)
 
 ### Infrastructure

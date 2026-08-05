@@ -4,6 +4,7 @@
 @using System.Text.RegularExpressions
 @using EarlySignalSystem.Data
 @using EarlySignalSystem.Models
+@using EarlySignalSystem.Extensions
 @using Microsoft.EntityFrameworkCore
 @inject IDbContextFactory<AppDbContext> DbContextFactory
 
@@ -80,7 +81,7 @@
                             <MudText Typo="Typo.body2" Style="font-weight:600;">Total: $@purchase.TotalValue.ToString("N0")</MudText>
 
                             <MudStack Row="true" Justify="Justify.SpaceBetween" AlignItems="AlignItems.Center" Class="mt-3">
-                                <MudText Typo="Typo.caption" Class="mud-text-secondary">@purchase.PublishedAt.ToString("dd MMM yyyy")</MudText>
+                                <MudText Typo="Typo.caption" Class="mud-text-secondary">@purchase.PublishedAt.ToLocalDisplay("dd MMM yyyy")</MudText>
                                 <MudChip T="string" Color="Color.Success" Variant="Variant.Outlined" Size="Size.Small">Open Market Purchase</MudChip>
                             </MudStack>
                         </MudCardContent>

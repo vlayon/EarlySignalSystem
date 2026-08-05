@@ -2,6 +2,7 @@
 @rendermode InteractiveServer
 @using EarlySignalSystem.Data
 @using EarlySignalSystem.Models
+@using EarlySignalSystem.Extensions
 @using Microsoft.EntityFrameworkCore
 @inject IDbContextFactory<AppDbContext> DbContextFactory
 
@@ -29,7 +30,7 @@
                 <MudExpansionPanel>
                     <TitleContent>
                         <MudText Typo="Typo.subtitle1" Style="font-weight:600;">
-                            📅 @group.Key.ScanDate.ToString("dd MMM yyyy") — Scan #@group.Key.ScanNumber · @group.Companies.Count companies
+                            📅 @group.Key.ScanDate.ToLocalDisplay("dd MMM yyyy") — Scan #@group.Key.ScanNumber · @group.Companies.Count companies
                         </MudText>
                     </TitleContent>
                     <ChildContent>
