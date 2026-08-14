@@ -46,6 +46,14 @@ public static class RecurringJobScheduler
             service => service.AnalyzeSignalsAsync(CancellationToken.None),
             "30 18 * * *");
 
+        // ticker-verifier е ПРЕДИ cumulative-scorer нарочно — виж коментара в Program.cs /api/scan-now
+        // веригата. AI Analyzer-ът току-що създаде нови компании без тикър; ако Scorer-ът мине първи,
+        // днешните нови компании остават без тикър/цена цял ден до утрешния цикъл.
+        RecurringJob.AddOrUpdate<ITickerVerificationService>(
+            "ticker-verifier",
+            service => service.VerifyPendingTickersAsync(CancellationToken.None),
+            "45 18 * * *");
+
         RecurringJob.AddOrUpdate<ICumulativeScoringService>(
             "cumulative-scorer",
             service => service.CalculateScoresAsync(CancellationToken.None),
@@ -55,11 +63,6 @@ public static class RecurringJobScheduler
             "technical-assessor",
             service => service.AssessTopCompaniesAsync(CancellationToken.None),
             "15 19 * * *");
-
-        RecurringJob.AddOrUpdate<ITickerVerificationService>(
-            "ticker-verifier",
-            service => service.VerifyPendingTickersAsync(CancellationToken.None),
-            "0 20 * * *");
     }
 
     // "Scan Now" вече изпълни ръчно днешния цикъл — пренасрочваме всеки recurring job да гръмне
@@ -110,6 +113,11 @@ public static class RecurringJobScheduler
             service => service.AnalyzeSignalsAsync(CancellationToken.None),
             $"30 18 {dayMonth} *");
 
+        RecurringJob.AddOrUpdate<ITickerVerificationService>(
+            "ticker-verifier",
+            service => service.VerifyPendingTickersAsync(CancellationToken.None),
+            $"45 18 {dayMonth} *");
+
         RecurringJob.AddOrUpdate<ICumulativeScoringService>(
             "cumulative-scorer",
             service => service.CalculateScoresAsync(CancellationToken.None),
@@ -119,11 +127,6 @@ public static class RecurringJobScheduler
             "technical-assessor",
             service => service.AssessTopCompaniesAsync(CancellationToken.None),
             $"15 19 {dayMonth} *");
-
-        RecurringJob.AddOrUpdate<ITickerVerificationService>(
-            "ticker-verifier",
-            service => service.VerifyPendingTickersAsync(CancellationToken.None),
-            $"0 20 {dayMonth} *");
 
         var restoreAt = tomorrow.AddHours(20);
         BackgroundJob.Schedule(() => RestoreDailySchedule(), restoreAt - DateTime.Now);

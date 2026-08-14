@@ -19,6 +19,12 @@ public class TickerVerificationService : ITickerVerificationService
     // (20/мин с безплатен ключ — не изискваме ключ, само го ползваме ако е конфигуриран).
     private const string OpenFigiSearchUrl = "https://api.openfigi.com/v3/search";
     private const int OpenFigiRateLimitDelayMs = 12_500;
+
+    // Yahoo Finance-ото собствено search API — свободно, без ключ, без документиран дневен лимит,
+    // последен реален опит преди AI-hint fallback-а. Undocumented (виж YahooFinanceService за същата
+    // "изисква User-Agent, иначе 429" забележка, потвърдена на живо и тук).
+    private const string YahooSearchApiUrl = "https://query1.finance.yahoo.com/v1/finance/search";
+    private const string YahooUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
     private const int MaxCompaniesPerRun = 15;
     private const int RateLimitDelayMs = 1500;
     private const string JobName = "Ticker-Verifier";
@@ -41,12 +47,18 @@ public class TickerVerificationService : ITickerVerificationService
     // не самата борса — нормализираме към държавно име (за Companies.Exchange) и ranked preference
     // (по-нисък Rank = по-предпочитана борса). Регион, който не съвпада с нищо тук, е извън обхвата
     // (Индия, Бразилия, OTC и т.н.) и се отхвърля изцяло.
+    // Ползва се и за AV-евото "4. region" поле, и за Yahoo Finance search-а "exchDisp" поле (виж
+    // SearchYahooAsync) — двата извикват различни низове за едни и същи борси (AV: "United States",
+    // Yahoo: "NYSE"/"NASDAQ"), затова таблицата съдържа по няколко alias-а на ключова дума за общите борси.
     private static readonly (string RegionKeyword, int Rank, string ExchangeLabel)[] ExchangeRankings =
     [
         ("United States", 1, "United States"),
+        ("NYSE", 1, "United States"),
+        ("NASDAQ", 1, "United States"),
         ("Frankfurt", 2, "Germany"),
         ("XETRA", 2, "Germany"),
         ("United Kingdom", 3, "United Kingdom"),
+        ("London", 3, "United Kingdom"),
         ("Paris", 4, "France"),
         ("Amsterdam", 4, "Netherlands"),
         ("Brussels", 4, "Belgium"),
@@ -164,13 +176,32 @@ public class TickerVerificationService : ITickerVerificationService
                     // глобално покритие от AV, но по-строг rate limit (5/мин без ключ).
                     if (best is null)
                     {
-                        if (calledOpenFigi)
+                        if (!string.IsNullOrWhiteSpace(company.TickerHint))
                         {
-                            await Task.Delay(OpenFigiRateLimitDelayMs, cancellationToken);
-                        }
-                        calledOpenFigi = true;
+                            if (calledOpenFigi)
+                            {
+                                await Task.Delay(OpenFigiRateLimitDelayMs, cancellationToken);
+                            }
+                            calledOpenFigi = true;
 
-                        best = await SearchOpenFigiAsync(company.TickerHint ?? company.CompanyName, cancellationToken);
+                            best = await SearchOpenFigiAsync(company.TickerHint, cancellationToken);
+                        }
+
+                        // Търсене по bare ticker hint (напр. "HUH1V") може да върне само деривативи
+                        // (futures/options на акцията), без нито един истински "Common Stock" резултат в
+                        // страницата — потвърдено на живо за Huhtamaki. Пълното име на компанията търси
+                        // по-точно и връща реалната акция сред резултатите. Падаме към него ако hint-ът
+                        // не даде нищо приемливо.
+                        if (best is null)
+                        {
+                            if (calledOpenFigi)
+                            {
+                                await Task.Delay(OpenFigiRateLimitDelayMs, cancellationToken);
+                            }
+                            calledOpenFigi = true;
+
+                            best = await SearchOpenFigiAsync(company.CompanyName, cancellationToken);
+                        }
 
                         // OpenFIGI връща "чист" symbol, но StockPriceService/OverboughtOversoldService
                         // ползват само Alpha Vantage за цени/RSI/MACD, а AV изисква суфиксиран формат
@@ -190,6 +221,16 @@ public class TickerVerificationService : ITickerVerificationService
                                 best = avCrossCheck;
                             }
                         }
+                    }
+
+                    // OpenFIGI също не намери нищо — Yahoo Finance-ото собствено (undocumented) search
+                    // API е последният реален опит преди AI-hint fallback-а. Връща Yahoo-нативен symbol
+                    // директно (напр. "1HUH.MI"), който вече е съвместим с YahooFinanceService за цени/
+                    // RSI/MACD без нужда от AV cross-check стъпката по-горе (тя е специфична за OpenFIGI-
+                    // евите symbol-и, които не са гарантирано в Yahoo-нотация).
+                    if (best is null)
+                    {
+                        best = await SearchYahooAsync(company.TickerHint ?? company.CompanyName, cancellationToken);
                     }
 
                     if (best is not null)
@@ -301,6 +342,17 @@ public class TickerVerificationService : ITickerVerificationService
                 continue;
             }
 
+            // LSE-ово "International Order Book" (IOB) — cross-listing сегмент за чужди акции. За разлика
+            // от OTC ADR-и (реални, просто по-slabo ликвидни US сделки), IOB duplicate listings често изобщо
+            // спират да търгуват — потвърдено на живо: Clariant "0QJS.LON" и Huhtamaki "0K9W.LON", и двете
+            // без нито една сделка след 2026-07-17, докато основните им борси (Xetra/Milan) вървят нормално.
+            // Пълно отхвърляне, не само демоция — по-добре компанията да остане unverified (следващ run
+            // пробва пак, може с различен tier resultат) отколкото завинаги заклещена зад "цена = null".
+            if (IsLikelyIobTicker(symbol))
+            {
+                continue;
+            }
+
             // OTC ADR/foreign-ordinary тикъри (виж IsLikelyOtcAdrTicker) не са компанията реалната борса —
             // винаги предпочитаме истинска регионална борса пред тях. Но не ги отхвърляме напълно: ако AV
             // не върне НИЩО друго за тази компания, по-добре OTC цена, отколкото никаква (LastResortRank
@@ -342,11 +394,18 @@ public class TickerVerificationService : ITickerVerificationService
         {
             var ticker = item.TryGetProperty("ticker", out var tickerElement) ? tickerElement.GetString() : null;
             var marketSector = item.TryGetProperty("marketSector", out var sectorElement) ? sectorElement.GetString() : null;
+            var securityType2 = item.TryGetProperty("securityType2", out var typeElement) ? typeElement.GetString() : null;
             var exchCode = item.TryGetProperty("exchCode", out var exchElement) ? exchElement.GetString() : null;
 
+            // Futures/options/indices на дадена акция също имат marketSector="Equity" в OpenFIGI-евата
+            // таксономия (объркващо) — потвърдено на живо: търсене по bare ticker hint (напр. "HUH1V" за
+            // Huhtamaki) връща предимно "SINGLE STOCK FUTURE" контракти с тикъри като "HUH1V=1", "HUH1V=9"
+            // (Bloomberg generic-future нотация), които марketSector филтърът сам по себе си пропускаше.
+            // securityType2 == "Common Stock" изисква реалната акция, не деривативи.
             if (string.IsNullOrWhiteSpace(ticker) ||
                 IsLikelyOtcAdrTicker(ticker) ||
-                !string.Equals(marketSector, "Equity", StringComparison.OrdinalIgnoreCase))
+                !string.Equals(marketSector, "Equity", StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(securityType2, "Common Stock", StringComparison.OrdinalIgnoreCase))
             {
                 continue;
             }
@@ -383,6 +442,65 @@ public class TickerVerificationService : ITickerVerificationService
             "SS" => "Sweden",
             _ => $"OpenFIGI ({exchCode})"
         };
+    }
+
+    private async Task<RankedMatch?> SearchYahooAsync(string query, CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"{YahooSearchApiUrl}?q={Uri.EscapeDataString(query)}");
+        request.Headers.TryAddWithoutValidation("User-Agent", YahooUserAgent);
+
+        using var response = await _httpClient.SendAsync(request, cancellationToken);
+        if (!response.IsSuccessStatusCode)
+        {
+            return null;
+        }
+
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        using var payload = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+
+        if (!payload.RootElement.TryGetProperty("quotes", out var quotes) || quotes.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        var candidates = new List<RankedMatch>();
+        foreach (var item in quotes.EnumerateArray())
+        {
+            var symbol = item.TryGetProperty("symbol", out var symbolElement) ? symbolElement.GetString() : null;
+            var quoteType = item.TryGetProperty("quoteType", out var typeElement) ? typeElement.GetString() : null;
+            var exchDisp = item.TryGetProperty("exchDisp", out var exchElement) ? exchElement.GetString() : null;
+
+            // quoteType филтрира индекси/фючърси/опции/ETF-и и т.н. — Yahoo-то, за разлика от OpenFIGI,
+            // прави тази разлика изрично видима вместо да ги смесва под общ "Equity" sector.
+            if (string.IsNullOrWhiteSpace(symbol) || !string.Equals(quoteType, "EQUITY", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            // "International Orderbook" (LSE-ово cross-listing за чужди акции) е технически валиден
+            // Equity резултат, но на практика почти нелинкидиран duplicate listing — потвърдено на живо
+            // за Huhtamaki (0K9W.IL/.LON): последна реална сделка беше от преди седмици, докато
+            // основната ѝ борса (Milan/Helsinki) търгуваше нормално всеки ден. Отхвърляме изрично,
+            // вместо да разчитаме случайно на по-добър кандидат по-надолу в списъка.
+            if (exchDisp is not null && exchDisp.Contains("International Orderbook", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var exchange = ClassifyExchange(exchDisp);
+            if (exchange is null)
+            {
+                // Извън обхвата на предпочитаните борси (напр. Индия NSE/BSE, Бразилия São Paulo) —
+                // отхвърляме напълно, вместо да гадаем ранг.
+                continue;
+            }
+
+            var rank = IsLikelyOtcAdrTicker(symbol) ? LastResortOtcRank : exchange.Value.Rank;
+            var label = IsLikelyOtcAdrTicker(symbol) ? $"{exchange.Value.Label} (OTC)" : exchange.Value.Label;
+            candidates.Add(new RankedMatch(symbol, label, rank, 1m));
+        }
+
+        return PickBest(candidates);
     }
 
     private static (int Rank, string Label)? ClassifyExchange(string? region)
@@ -494,6 +612,12 @@ public class TickerVerificationService : ITickerVerificationService
 
     private static bool IsLikelyOtcAdrTicker(string ticker) =>
         ticker.Length == 5 && (ticker[^1] == 'Y' || ticker[^1] == 'F') && ticker.All(char.IsAsciiLetter);
+
+    // LSE International Order Book тикъри имат разпознаваем формат: започват с цифра, AV суфиксира ги с
+    // ".LON" (напр. "0QJS.LON", "0K9W.LON") — виж коментара при употребата за защо ги отхвърляме напълно.
+    private static readonly Regex IobTickerPattern = new(@"^\d.*\.LON$", RegexOptions.Compiled);
+
+    private static bool IsLikelyIobTicker(string ticker) => IobTickerPattern.IsMatch(ticker);
 
     private static string NormalizeCompanyName(string name)
     {

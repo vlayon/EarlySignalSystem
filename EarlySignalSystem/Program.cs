@@ -96,18 +96,22 @@ app.MapPost("/api/scan-now", (IBackgroundJobClient backgroundJobs) =>
             oecdJobId, s => s.CollectAmfSignalsAsync(CancellationToken.None));
         var analyzerJobId = backgroundJobs.ContinueJobWith<IAiAnalyzerService>(
             amfJobId, s => s.AnalyzeSignalsAsync(CancellationToken.None));
+        // Ticker Verifier е ПРЕДИ Cumulative Scorer нарочно: AI Analyzer-ът току-що създаде нови Company
+        // редове с Ticker = null — Cumulative Scorer чете Companies.Ticker "на живо" всеки run (виж
+        // CumulativeScoringService), затова тикърите трябва да са резолвнати преди да сметне score-овете,
+        // иначе днешните нови компании остават без тикър/цена цял ден до утрешния цикъл.
+        var tickerVerifierJobId = backgroundJobs.ContinueJobWith<ITickerVerificationService>(
+            analyzerJobId, s => s.VerifyPendingTickersAsync(CancellationToken.None));
         var scorerJobId = backgroundJobs.ContinueJobWith<ICumulativeScoringService>(
-            analyzerJobId, s => s.CalculateScoresAsync(CancellationToken.None));
+            tickerVerifierJobId, s => s.CalculateScoresAsync(CancellationToken.None));
         var technicalJobId = backgroundJobs.ContinueJobWith<IOverboughtOversoldService>(
             scorerJobId, s => s.AssessTopCompaniesAsync(CancellationToken.None));
-        var tickerVerifierJobId = backgroundJobs.ContinueJobWith<ITickerVerificationService>(
-            technicalJobId, s => s.VerifyPendingTickersAsync(CancellationToken.None));
 
         // Освобождаваме gate-а веднага щом веригата приключи успешно (последната стъпка). Hangfire OSS
         // continuation-ите по подразбиране се движат само при успех на предходната стъпка — ако някоя
         // по-ранна стъпка се провали, веригата спира по-рано и release continuation-ът никога не минава.
         // Затова добавяме и 15-минутен safety-net schedule, за да не остане gate-ът заключен завинаги.
-        backgroundJobs.ContinueJobWith(tickerVerifierJobId, () => ScanGate.Release());
+        backgroundJobs.ContinueJobWith(technicalJobId, () => ScanGate.Release());
         backgroundJobs.Schedule(() => ScanGate.Release(), TimeSpan.FromMinutes(15));
 
         RecurringJobScheduler.SkipTodayAndRescheduleForTomorrow();

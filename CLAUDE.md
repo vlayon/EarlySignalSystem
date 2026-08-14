@@ -63,9 +63,11 @@ AI-powered инвестиционен скенер с дългосрочен х�
 | oecd-collector | 18:20 | OECD Composite Leading Indicator (месечен turning-point сигнал по държави) | ✅ Работи (виж по-долу) |
 | amf-collector | 18:25 | Short selling register (AMF France, замества ESMA) | ✅ Работи (виж по-долу) |
 | ai-signal-analyzer | 18:30 | Claude API анализ | ✅ Работи |
+| ticker-verifier | 18:45 | SEC/AV/OpenFIGI/Yahoo ticker lookup | ✅ Работи |
 | cumulative-scorer | 19:00 | Scoring engine | ✅ Работи |
 | technical-assessor | 19:15 | Overbought/Oversold | ✅ Работи |
-| ticker-verifier | 20:00 | Alpha Vantage ticker lookup | ✅ Работи |
+
+**Ред на веригата:** ticker-verifier е нарочно ПРЕДИ cumulative-scorer (и в cron-а, и в `/api/scan-now` ContinueJobWith веригата в Program.cs) — не е случаен избор. AI Analyzer-ът създава нови `Company` редове с `Ticker = null`; Cumulative Scorer чете `Companies.Ticker` "на живо" всеки run. Ако Scorer-ът мине първи, днешните нови компании остават без тикър/цена цял ден до утрешния цикъл (открито на живо 2026-08-14 — Stryker и Elastic имаха верифициран тикър, но shortlist-ът още показваше null, защото Ticker Verifier беше последна стъпка в старата верига). Правилният ред по зависимости е: collectors → AI Analyzer → **Ticker Verifier** → Cumulative Scorer → Technical Assessor.
 
 ## Scoring логика
 Компания влиза в CumulativeScores ако:
@@ -84,13 +86,18 @@ Ordering на топ 5 (Shortlist):
 3. FirstSignalDate DESC (по-нова = по-добре)
 
 ## Ticker Verification логика
-4-degrees pipeline, всяко ниво се пробва само ако предишното не намери нищо:
-1. **SEC** (`company_tickers.json`) — безплатно, без ключ, без rate limit. Само US-listed компании. OTC ADR/foreign-ordinary тикъри (5 букви, завършващи на Y/F) се пазят отделно като last-resort fallback (стъпка 4), не се приемат директно тук.
+5-degrees pipeline, всяко ниво се пробва само ако предишното не намери нищо:
+1. **SEC** (`company_tickers.json`) — безплатно, без ключ, без rate limit. Само US-listed компании. OTC ADR/foreign-ordinary тикъри (5 букви, завършващи на Y/F) се пазят отделно като last-resort fallback (стъпка 5), не се приемат директно тук.
 2. **Alpha Vantage** SYMBOL_SEARCH — пробва се първо по `TickerHint` (ако AI Analyzer-ът е дал такъв), после по CompanyName. Предпочитани борси по ранг: NYSE/NASDAQ → XETRA/Frankfurt → London → Euronext (Paris/Amsterdam/Brussels) → Milan → Madrid → други европейски. OTC-suffix тикъри се приемат само като last-resort (по-лош ранг от всяка истинска борса). 25 заявки/ден общо (споделено и с RSI/MACD/цени) — тесното място.
-3. **OpenFIGI** — много по-широко глобално покритие от AV, 5 заявки/мин без ключ (20/мин с `OpenFigi:ApiKey`, опционален).
-4. **Fallback**: SEC OTC тикър (ако има) → директно `TickerHint` от AI Analyzer-а, маркиран `Exchange = "AI suggested (unverified)"` → ако нищо: `TickerVerified = true`, `Ticker = null` (UI показва "No ticker found", опашката не блокира вечно).
+3. **OpenFIGI** — много по-широко глобално покритие от AV, 5 заявки/мин без ключ (20/мин с `OpenFigi:ApiKey`, опционален). Пробва се първо по `TickerHint`, после по CompanyName ако hint-ът не даде нищо приемливо. **Важно**: филтрира по `securityType2 == "Common Stock"`, не само по `marketSector == "Equity"` — futures/options контракти на дадена акция ИСКАТ marketSector="Equity" в OpenFIGI-евата таксономия (объркващо), затова без този филтър bare ticker hint търсене може да върне Bloomberg-ов futures ticker (напр. "HUH1V=1" вместо реалната акция "HUH1V") — открито на живо 2026-08-14.
+4. **Yahoo Finance** search (`query1.finance.yahoo.com/v1/finance/search`) — свободно, без ключ, без документиран дневен лимит, изисква `User-Agent` header (иначе 429). Филтрира по `quoteType == "EQUITY"`. Връща Yahoo-нативен symbol директно, вече съвместим с `YahooFinanceService` за цени/RSI/MACD без нужда от AV cross-check.
+5. **Fallback**: SEC OTC тикър (ако има) → директно `TickerHint` от AI Analyzer-а, маркиран `Exchange = "AI suggested (unverified)"` → ако нищо: `TickerVerified = true`, `Ticker = null` (UI показва "No ticker found", опашката не блокира вечно).
 
-Обработва максимум 15 компании на run (SEC/OpenFIGI fallback стъпките не пипат AV квотата).
+Обработва максимум 15 компании на run (SEC/OpenFIGI/Yahoo fallback стъпките не пипат AV квотата).
+
+**LSE International Order Book (IOB) тикъри се отхвърлят напълно.** Разпознаваем формат: започват с цифра, AV суфикс `.LON` (напр. `0QJS.LON`, `0K9W.LON`). За разлика от OTC ADR-и (реални, просто по-слабо ликвидни US сделки), IOB duplicate listings често напълно спират да търгуват — потвърдено на живо: Clariant и Huhtamaki и двете имаха такъв тикър, без нито една реална сделка от 2026-07-17 нататък, докато основните им борси (Xetra/Milan) вървяха нормално. `IsLikelyIobTicker` филтърът в `SearchSymbolAsync` ги маха преди `PickBest`, за да не заклещи компанията завинаги зад "цена = null" (по-добре `TickerVerified = false` и retry следващия run).
+
+**Известен delisting случай**: Sealed Air Corporation (`SEE`) — Alpha Vantage-овите данни не са опреснявани от 2026-04-09, Yahoo връща "symbol may be delisted" консистентно (потвърдено на живо 2026-08-14). И двата независими източника се съгласяват — компанията реално е спряла да се търгува преди месеци. Не е bug в пайплайна, тикърът е валиден формат, просто няма живи данни зад него на никой доставчик. Кандидат за бъдещо подобрение: freshness проверка при верификация (отхвърляй тикър, чиято последна известна сделка е по-стара от X дни), но не е имплементирано.
 
 ## EP Parliament Collector логика
 Извиква EP Open Data API v2 (`data.europarl.europa.eu/api/v2/committee-documents/feed`) — свободен достъп, без ключ, лимит 500 заявки/5мин. Feed-ът връща Atom записи за draft committee доклади/становища, публикувани или обновени през последния месец.
@@ -122,7 +129,7 @@ ESMA премести собствения си net-short-position регист�
 - /shortlist — Пълен shortlist топ 5 с детайли
 - /insiders — SEC EDGAR Form 4 insider покупки
 - /history — Дневни snapshots на shortlist-а (групирани по дата)
-- /technical — линкнат като "Dashboard" в header-а (не в sidebar-а), Pipeline Stages (4 stage-card-а: Signal Collection → AI Analysis → Scoring & Shortlisting → Enrichment, всеки съдържа вложени job card-ове) + scan история
+- /technical — линкнат като "Dashboard" в header-а (не в sidebar-а), Pipeline Stages (5 stage-card-а: Signal Collection → AI Analysis → Ticker Resolution → Scoring & Shortlisting → Enrichment, всеки съдържа вложени job card-ове; auto-refresh на всеки 5 секунди) + scan история
 - /hangfire — Hangfire dashboard
 
 Sidebar ред: Home → Shortlist → Insiders → History → бутон "Scan Now". "Dashboard" (/technical) е в header-а горе вдясно, преди "About", не в sidebar-а.

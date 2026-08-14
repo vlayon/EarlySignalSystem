@@ -181,10 +181,10 @@
     private const string NeutralBorderColor = "#374151";
     private const string CompactDateTimeFormat = "dd.MM HH:mm";
     private static readonly TimeSpan RefreshInterval = TimeSpan.FromSeconds(5);
-    // Stage 2 (AI Analysis) и Stage 3 (Scoring & Shortlisting) имат само по 1 job всяка, затова се
-    // показват sm=6 една до друга на същия визуален ред (виж markup-а: MudItem sm е 6, когато
-    // stage.Cards.Count == 1) — не им трябва стрелка помежду им. Стрелка се показва само пред индекс 1
-    // (влизане в реда на Stage 2+3) и пред индекс 3 (Stage 4, следващ пълен ред).
+    // Stages 2-5 (AI Analysis, Ticker Resolution, Scoring & Shortlisting, Enrichment) имат само по 1 job
+    // всяка, затова се показват по две sm=6 на визуален ред (виж markup-а: MudItem sm е 6, когато
+    // stage.Cards.Count == 1): ред 1 = Stage 2+3, ред 2 = Stage 4+5. Стрелка се показва само пред индекс 1
+    // (влизане в реда на Stage 2+3, след пълноширочния Stage 1) и пред индекс 3 (влизане в реда на Stage 4+5).
     private static readonly HashSet<int> ArrowBeforeStageIndex = [1, 3];
 
     private bool _loading = true;
@@ -274,10 +274,13 @@
         var tickerVerifierCard = new CanalCard("Ticker Verifier", "Tickers verified", latestRunLogs["Ticker-Verifier"], false,
             "Looks up the real stock ticker for each newly-discovered company — first for free in the SEC registry, then Alpha Vantage — so prices and charts can be shown.", "ticker-verifier");
 
+        // Редът тук отразява РЕАЛНАТА verига от Program.cs /api/scan-now (ContinueJobWith) — IsQueuedBehindEarlierStage
+        // разчита на този ред, за да познае кои job-ове вече би трябвало да са минали в текущата вълна.
+        // Ticker Verifier е ПРЕДИ Cumulative Scorer нарочно (виж коментара в Program.cs).
         _canalCards =
         [
             eurLexCard, epParliamentCard, secEdgarCard, secEdgar13DGCard, tedCard, oecdCard, amfCard,
-            aiAnalyzerCard, cumulativeScorerCard, technicalAssessorCard, tickerVerifierCard,
+            aiAnalyzerCard, tickerVerifierCard, cumulativeScorerCard, technicalAssessorCard,
         ];
 
         // Изчистваме оптимистичния "Running" флаг само след като auto-refresh-ът потвърди РЕАЛЕН нов run
@@ -303,10 +306,12 @@
                 [eurLexCard, epParliamentCard, secEdgarCard, secEdgar13DGCard, tedCard, oecdCard, amfCard]),
             new CanalStage("2 · AI Analysis", "Claude reviews all collected signals and identifies real, publicly-traded companies with a concrete rationale.",
                 [aiAnalyzerCard]),
-            new CanalStage("3 · Scoring & Shortlisting", "Aggregates signals per company into a score and decides which companies make the top-5 shortlist.",
+            new CanalStage("3 · Ticker Resolution", "Looks up the real stock ticker for every newly-discovered company — runs before scoring so today's new companies get a price, not just tomorrow's.",
+                [tickerVerifierCard]),
+            new CanalStage("4 · Scoring & Shortlisting", "Aggregates signals per company into a score and decides which companies make the top-5 shortlist.",
                 [cumulativeScorerCard]),
-            new CanalStage("4 · Enrichment", "Resolves stock tickers and technical (overbought/oversold) indicators for the shortlisted companies.",
-                [technicalAssessorCard, tickerVerifierCard]),
+            new CanalStage("5 · Enrichment", "Assesses whether the shortlisted companies' price looks overbought or oversold — a technical, not fundamental, indicator.",
+                [technicalAssessorCard]),
         ];
 
         _totalSignalsToday = await dbContext.RunLogs
