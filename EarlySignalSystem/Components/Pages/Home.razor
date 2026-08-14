@@ -48,6 +48,18 @@
                                     {
                                         <MudChip T="string" Color="@GetSentimentColor(sentiment)" Variant="Variant.Filled" Size="Size.Small">@GetSentimentLabel(sentiment)</MudChip>
                                     }
+                                    @if (!string.IsNullOrWhiteSpace(entry.Ticker) && _assessmentByTicker.TryGetValue(entry.Ticker, out var assessment))
+                                    {
+                                        <MudTooltip Text="@assessment.Reason">
+                                            <MudChip T="string" Color="@GetAssessmentColor(assessment.Assessment)" Variant="Variant.Filled" Size="Size.Small">@GetAssessmentLabel(assessment.Assessment)</MudChip>
+                                        </MudTooltip>
+                                    }
+                                    @if (entry.LateDetectionFlag)
+                                    {
+                                        <MudTooltip Text="@($"{entry.LateDetectionReason} — the market may already be reacting to this signal, which reduces the edge of picking it now.")">
+                                            <MudChip T="string" Color="Color.Warning" Variant="Variant.Filled" Size="Size.Small">⏱ Late detection</MudChip>
+                                        </MudTooltip>
+                                    }
                                     <MudChip T="string" Color="@GetScoreColor(entry.Score)" Variant="Variant.Filled" Size="Size.Small">
                                         @entry.Score.ToString("0.0")
                                     </MudChip>
@@ -90,6 +102,12 @@
                                             <MudText Typo="Typo.h6" Style="font-weight:700;" Color="@GetPriceChangeColor(entry.PriceChangePercent.Value)">
                                                 @GetPriceChangeArrow(entry.PriceChangePercent.Value) @entry.PriceChangePercent.Value.ToString("0.0")%
                                             </MudText>
+                                        }
+                                        @if (!string.IsNullOrWhiteSpace(entry.Ticker) && latestPrice is null)
+                                        {
+                                            <MudTooltip Text="This ticker is verified but neither price source has recent trading data for it — the company may have been delisted, acquired, or gone private.">
+                                                <MudChip T="string" Color="Color.Default" Variant="Variant.Outlined" Size="Size.Small">⚠ No live price</MudChip>
+                                            </MudTooltip>
                                         }
                                     </MudStack>
                                 </MudStack>
@@ -179,6 +197,7 @@
     private Dictionary<string, List<CompanyPick>> _picksBySector = [];
     private List<CumulativeScore> _quickShortlist = [];
     private Dictionary<string, string?> _sentimentByCompany = [];
+    private Dictionary<string, TechnicalAssessment> _assessmentByTicker = [];
     private readonly HashSet<int> _expandedIds = [];
 
     protected override async Task OnInitializedAsync()
@@ -203,6 +222,20 @@
         _sentimentByCompany = recentPicksByCompany
             .GroupBy(p => p.CompanyName)
             .ToDictionary(g => g.Key, g => g.First().Sentiment);
+
+        var quickShortlistTickers = _quickShortlist
+            .Where(s => !string.IsNullOrWhiteSpace(s.Ticker))
+            .Select(s => s.Ticker!)
+            .ToList();
+        var recentAssessments = quickShortlistTickers.Count == 0
+            ? []
+            : await dbContext.TechnicalAssessments
+                .Where(t => quickShortlistTickers.Contains(t.Ticker))
+                .OrderByDescending(t => t.AssessedAt)
+                .ToListAsync();
+        _assessmentByTicker = recentAssessments
+            .GroupBy(t => t.Ticker)
+            .ToDictionary(g => g.Key, g => g.First());
 
         var today = DateTime.Today;
 
@@ -283,6 +316,20 @@
         "Bullish" => "↑ Bullish",
         "Bearish" => "↓ Bearish",
         _ => "→ Neutral",
+    };
+
+    private static Color GetAssessmentColor(string assessment) => assessment switch
+    {
+        "Overbought" => Color.Error,
+        "Oversold" => Color.Success,
+        _ => Color.Warning,
+    };
+
+    private static string GetAssessmentLabel(string assessment) => assessment switch
+    {
+        "Overbought" => "🔴 Overbought",
+        "Oversold" => "🟢 Oversold",
+        _ => "🟡 Neutral",
     };
 
     private static string Truncate(string? rationale)

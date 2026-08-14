@@ -38,6 +38,10 @@ public class YahooFinanceService : IYahooFinanceService
     // защита като при Alpha Vantage-кия delay в StockPriceService/OverboughtOversoldService.
     private bool _hasMadeRequest;
 
+    // Close и Volume идват от ЕДИН и същ chart отговор — кешираме суровия parse по тикър в рамките на
+    // instance-а, за да не удряме Yahoo два пъти, когато LateDetectionService поиска и двете за същия тикър.
+    private readonly Dictionary<string, ChartData?> _chartCache = new(StringComparer.OrdinalIgnoreCase);
+
     public YahooFinanceService(HttpClient httpClient, ILogger<YahooFinanceService> logger)
     {
         _httpClient = httpClient;
@@ -46,9 +50,26 @@ public class YahooFinanceService : IYahooFinanceService
 
     public async Task<IReadOnlyDictionary<DateTime, decimal>?> GetDailyClosesAsync(string ticker, CancellationToken cancellationToken = default)
     {
+        var chart = await GetChartDataAsync(ticker, cancellationToken);
+        return chart?.Closes;
+    }
+
+    public async Task<IReadOnlyDictionary<DateTime, long>?> GetDailyVolumesAsync(string ticker, CancellationToken cancellationToken = default)
+    {
+        var chart = await GetChartDataAsync(ticker, cancellationToken);
+        return chart?.Volumes;
+    }
+
+    private async Task<ChartData?> GetChartDataAsync(string ticker, CancellationToken cancellationToken)
+    {
         if (string.IsNullOrWhiteSpace(ticker))
         {
             return null;
+        }
+
+        if (_chartCache.TryGetValue(ticker, out var cached))
+        {
+            return cached;
         }
 
         var yahooSymbol = ConvertAvTickerToYahoo(ticker);
@@ -68,6 +89,7 @@ public class YahooFinanceService : IYahooFinanceService
             if (!response.IsSuccessStatusCode)
             {
                 _logger.LogWarning("Yahoo Finance returned {StatusCode} for {Ticker} ({YahooSymbol})", response.StatusCode, ticker, yahooSymbol);
+                _chartCache[ticker] = null;
                 return null;
             }
 
@@ -78,30 +100,41 @@ public class YahooFinanceService : IYahooFinanceService
             var results = root.GetProperty("result");
             if (results.ValueKind != JsonValueKind.Array || results.GetArrayLength() == 0)
             {
+                _chartCache[ticker] = null;
                 return null;
             }
 
             var result = results[0];
             var timestamps = result.GetProperty("timestamp");
-            var closes = result.GetProperty("indicators").GetProperty("quote")[0].GetProperty("close");
+            var quote = result.GetProperty("indicators").GetProperty("quote")[0];
+            var closes = quote.GetProperty("close");
+            var hasVolume = quote.TryGetProperty("volume", out var volumes);
 
-            var series = new Dictionary<DateTime, decimal>();
+            var closeSeries = new Dictionary<DateTime, decimal>();
+            var volumeSeries = new Dictionary<DateTime, long>();
             for (var i = 0; i < timestamps.GetArrayLength(); i++)
             {
-                if (closes[i].ValueKind != JsonValueKind.Number)
+                var date = DateTimeOffset.FromUnixTimeSeconds(timestamps[i].GetInt64()).UtcDateTime.Date;
+
+                if (closes[i].ValueKind == JsonValueKind.Number)
                 {
-                    continue;
+                    closeSeries[date] = closes[i].GetDecimal();
                 }
 
-                var date = DateTimeOffset.FromUnixTimeSeconds(timestamps[i].GetInt64()).UtcDateTime.Date;
-                series[date] = closes[i].GetDecimal();
+                if (hasVolume && volumes[i].ValueKind == JsonValueKind.Number)
+                {
+                    volumeSeries[date] = volumes[i].GetInt64();
+                }
             }
 
-            return series.Count > 0 ? series : null;
+            var chart = closeSeries.Count > 0 ? new ChartData(closeSeries, volumeSeries) : null;
+            _chartCache[ticker] = chart;
+            return chart;
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to fetch Yahoo Finance daily closes for {Ticker} ({YahooSymbol})", ticker, yahooSymbol);
+            _logger.LogWarning(ex, "Failed to fetch Yahoo Finance chart data for {Ticker} ({YahooSymbol})", ticker, yahooSymbol);
+            _chartCache[ticker] = null;
             return null;
         }
     }
@@ -119,4 +152,6 @@ public class YahooFinanceService : IYahooFinanceService
         // Без AV suffix (US тикъри и OTC ADR-и) — Yahoo ползва същия bare symbol.
         return avTicker;
     }
+
+    private sealed record ChartData(IReadOnlyDictionary<DateTime, decimal> Closes, IReadOnlyDictionary<DateTime, long> Volumes);
 }

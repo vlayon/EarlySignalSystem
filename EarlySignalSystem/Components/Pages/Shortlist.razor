@@ -68,6 +68,12 @@
                                             <MudChip T="string" Color="@GetAssessmentColor(entry.Assessment.Assessment)" Variant="Variant.Filled" Size="Size.Small">@GetAssessmentLabel(entry.Assessment.Assessment)</MudChip>
                                         </MudTooltip>
                                     }
+                                    @if (entry.Score.LateDetectionFlag)
+                                    {
+                                        <MudTooltip Text="@($"{entry.Score.LateDetectionReason} — the market may already be reacting to this signal, which reduces the edge of picking it now.")">
+                                            <MudChip T="string" Color="Color.Warning" Variant="Variant.Filled" Size="Size.Small">⏱ Late detection</MudChip>
+                                        </MudTooltip>
+                                    }
                                     <MudText Typo="Typo.h4" Style="font-weight:700;" Color="@GetScoreColor(entry.Score.Score)">@entry.Score.Score.ToString("0.0")</MudText>
                                 </MudStack>
                             </MudStack>
@@ -111,6 +117,12 @@
                                             <MudText Typo="Typo.h6" Style="font-weight:700;" Color="@GetPriceChangeColor(entry.Score.PriceChangePercent.Value)">
                                                 @GetPriceChangeArrow(entry.Score.PriceChangePercent.Value) @entry.Score.PriceChangePercent.Value.ToString("0.0")%
                                             </MudText>
+                                        }
+                                        @if (!string.IsNullOrWhiteSpace(entry.Score.Ticker) && latestPrice is null)
+                                        {
+                                            <MudTooltip Text="This ticker is verified but neither price source has recent trading data for it — the company may have been delisted, acquired, or gone private.">
+                                                <MudChip T="string" Color="Color.Default" Variant="Variant.Outlined" Size="Size.Small">⚠ No live price</MudChip>
+                                            </MudTooltip>
                                         }
                                     </MudStack>
                                 </MudStack>

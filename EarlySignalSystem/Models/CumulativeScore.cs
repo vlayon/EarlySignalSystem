@@ -17,4 +17,7 @@ public class CumulativeScore
     public decimal? LatestPrice { get; set; }
     public DateTime? LatestPriceDate { get; set; }
     public decimal? PriceChangePercent { get; set; }
+
+    public bool LateDetectionFlag { get; set; }
+    public string? LateDetectionReason { get; set; }
 }

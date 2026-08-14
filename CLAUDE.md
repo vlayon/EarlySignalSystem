@@ -97,7 +97,14 @@ Ordering на топ 5 (Shortlist):
 
 **LSE International Order Book (IOB) тикъри се отхвърлят напълно.** Разпознаваем формат: започват с цифра, AV суфикс `.LON` (напр. `0QJS.LON`, `0K9W.LON`). За разлика от OTC ADR-и (реални, просто по-слабо ликвидни US сделки), IOB duplicate listings често напълно спират да търгуват — потвърдено на живо: Clariant и Huhtamaki и двете имаха такъв тикър, без нито една реална сделка от 2026-07-17 нататък, докато основните им борси (Xetra/Milan) вървяха нормално. `IsLikelyIobTicker` филтърът в `SearchSymbolAsync` ги маха преди `PickBest`, за да не заклещи компанията завинаги зад "цена = null" (по-добре `TickerVerified = false` и retry следващия run).
 
-**Известен delisting случай**: Sealed Air Corporation (`SEE`) — Alpha Vantage-овите данни не са опреснявани от 2026-04-09, Yahoo връща "symbol may be delisted" консистентно (потвърдено на живо 2026-08-14). И двата независими източника се съгласяват — компанията реално е спряла да се търгува преди месеци. Не е bug в пайплайна, тикърът е валиден формат, просто няма живи данни зад него на никой доставчик. Кандидат за бъдещо подобрение: freshness проверка при верификация (отхвърляй тикър, чиято последна известна сделка е по-стара от X дни), но не е имплементирано.
+**Ticker freshness check** (`IsTickerLiquidAsync`, добавен 2026-08-14): преди да се приеме кандидат от SEC-тира или от AV/OpenFIGI/Yahoo `best` резултата, проверяваме през `YahooFinanceService.GetDailyClosesAsync`, че последната реална сделка е в рамките на `StaleTickerThresholdDays` (14 дни) — иначе кандидатът се третира като "не намерен" и пайплайнът пада към следващия tier. Открито на живо: Sealed Air Corporation (`SEE`) имаше валиден формат тикър, но Alpha Vantage-овите данни не бяха опреснявани от 2026-04-09, а Yahoo връщаше "symbol may be delisted" — компанията реално е спряла да се търгува преди месеци, не bug в пайплайна. За вече верифицирани тикъри, които останат без цена въпреки това (напр. верифицирани преди тази проверка да съществува), UI-то показва "⚠ No live price" вместо тихо празно поле — виж `Shortlist.razor`/`Home.razor`.
+
+## Late Detection логика
+Сигнализира, че пазарът вероятно вече реагира на сигнала, преди системата да е действала по него — намалява реалния "edge" на pick-а, дори score-ът да е висок. Изчислява се в `CumulativeScoringService.DetectLateSignalAsync`, само за top 5 (същия обхват като ценовото обогатяване), пази се в `CumulativeScores.LateDetectionFlag`/`LateDetectionReason`, показва се като "⏱ Late detection" chip на Shortlist.razor и Home.razor Quick Shortlist картите.
+Два независими признака, всеки достатъчен сам по себе си:
+1. **Price reaction** — `|PriceChangePercent| >= 8%` спрямо цената при first signal.
+2. **Volume spike** — среден обем за последните 3 търговски дни >= 2.0x средния обем за предходните 20 дни (данни от `YahooFinanceService.GetDailyVolumesAsync`, добавен успоредно с `GetDailyClosesAsync` — двата споделят един и същ chart fetch по тикър, кеширан в instance-а).
+**Media coverage частта от оригиналната идея е спряна (dropped), няма да се имплементира.** Изследвано на живо (2026-08-14): Google News RSS (`news.google.com/rss/search`) е свободен, без ключ, но за активно търгувана компания (Elanco) връща 90+ статии, почти изцяло рутинно финансово отразяване (earnings, insider-trade ботове като MarketBeat/Stock Titan, analyst targets) без връзка с конкретния сигнал, заради който компанията е избрана. Просто броене на статии след first signal би сработвало като шум, не сигнал — би "гърмяло" за всяка добре отразявана компания и никога за наистина нишова. Смислена версия би изисквала targeted search (име на компания + ключова дума от AI rationale-а), оценено като прекалено усложнение за момента.
 
 ## EP Parliament Collector логика
 Извиква EP Open Data API v2 (`data.europarl.europa.eu/api/v2/committee-documents/feed`) — свободен достъп, без ключ, лимит 500 заявки/5мин. Feed-ът връща Atom записи за draft committee доклади/становища, публикувани или обновени през последния месец.
@@ -140,9 +147,12 @@ Sidebar ред: Home → Shortlist → Insiders → History → бутон "Scan
 15-минутен safety-net release при failed chain.
 
 ## Известни проблеми (предстои поправка)
-1. Overbought/Oversold badge — зависи от цените, засега не се показва
+Няма в момента.
 
 ## Решени проблеми (за история)
+- Overbought/Oversold badge — вече се показва на Shortlist.razor (беше вече wired, само чакаше данни) и добавен на Home.razor Quick Shortlist картите за паритет; tooltip с AI-generated Reason (2026-08-14)
+- Ticker freshness check — нови тикър кандидати вече се проверяват срещу Yahoo дневни данни преди да се приемат (`IsTickerLiquidAsync`, праг 14 дни); "мъртъв" тикър (напр. открито на живо: Sealed Air "SEE" — AV заседнал от 2026-04-09, Yahoo "may be delisted") вече не блокира компанията завинаги, пада към следващия tier. За вече верифицирани тикъри, които останат без цена, Shortlist/Home показват "⚠ No live price" chip вместо тихо празно поле (2026-08-14)
+- Late Detection (price reaction + volume spike) — виж "Late Detection логика"; тествано на живо, засече реален случай (Elanco, -11.8% от first signal) (2026-08-14)
 - "Companies: 0" в Scan History — проверено (2026-08-05): логиката е коректна,брои легитимно нулеви резултати, не бъг
 - UI scroll бъг — проверено (2026-08-05) на 3 viewport размера (Shortlist + Technical), скролва нормално навсякъде, вероятно поправено странично от render mode фикса
 - Tooltip на Velocity/Source Types chip-овете — добавени (Shortlist.razor, Home.razor), Source Types показва реалните имена на типовете сигнали при hover
@@ -155,11 +165,7 @@ Sidebar ред: Home → Shortlist → Insiders → History → бутон "Scan
 - Нов EP Parliament collector — draft committee доклади/становища, месеци преди EUR-Lex публикация; виж "EP Parliament Collector логика"; тествано на живо, 279 реални сигнала при първия run (2026-08-05)
 
 ## Предстои да се имплементира
-### Data
-- Late Detection checks — price reaction, volume spike, media coverage
-
 ### UI
-- Overbought/Oversold badge с reason tooltip
 - History страница — разпъване при клик работи, но History е празна (нужни са дни данни)
 
 ### Infrastructure

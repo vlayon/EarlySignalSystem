@@ -20,14 +20,23 @@ public class CumulativeScoringService : ICumulativeScoringService
     private const int TopShortlistSize = 5;
     private const string JobName = "Cumulative-Scorer";
 
+    // Late Detection — сигнализира, че пазарът вероятно вече е реагирал (по-малко "edge" в pick-а):
+    // цена, вече отдалечена значително от нивото ѝ при first signal, или необичайно висок обем.
+    private const decimal PriceReactionThresholdPercent = 8m;
+    private const decimal VolumeSpikeMultiplier = 2.0m;
+    private const int RecentVolumeWindowDays = 3;
+    private const int BaselineVolumeWindowDays = 20;
+
     private readonly AppDbContext _dbContext;
     private readonly IStockPriceService _stockPriceService;
+    private readonly IYahooFinanceService _yahooFinanceService;
     private readonly ILogger<CumulativeScoringService> _logger;
 
-    public CumulativeScoringService(AppDbContext dbContext, IStockPriceService stockPriceService, ILogger<CumulativeScoringService> logger)
+    public CumulativeScoringService(AppDbContext dbContext, IStockPriceService stockPriceService, IYahooFinanceService yahooFinanceService, ILogger<CumulativeScoringService> logger)
     {
         _dbContext = dbContext;
         _stockPriceService = stockPriceService;
+        _yahooFinanceService = yahooFinanceService;
         _logger = logger;
     }
 
@@ -230,6 +239,8 @@ public class CumulativeScoringService : ICumulativeScoringService
             score.PriceChangePercent = priceOnFirstSignalDate is > 0 && latestPrice.HasValue
                 ? (latestPrice.Value - priceOnFirstSignalDate.Value) / priceOnFirstSignalDate.Value * 100m
                 : null;
+
+            await DetectLateSignalAsync(score, cancellationToken);
         }
         catch (Exception ex)
         {
@@ -237,6 +248,42 @@ public class CumulativeScoringService : ICumulativeScoringService
             // да проваля целия scoring run — оставяме ценовите полета null и продължаваме.
             _logger.LogWarning(ex, "Failed to enrich price data for {Ticker}", score.Ticker);
         }
+    }
+
+    // "Late Detection" = пазарът вероятно вече реагира на сигнала, преди ние да сме действали по него —
+    // намалява реалния "edge" на pick-а, дори score-ът да е висок. Два независими признака, всеки
+    // достатъчен сам по себе си: (1) цената вече се е отдалечила значително от нивото при first signal,
+    // (2) необичайно висок обем напоследък спрямо предходния baseline (акумулация/разпродажба в ход).
+    // "Media coverage" частта от оригиналната идея не е включена — изисква news API интеграция
+    // (нов external source + вероятно ключ), отделно решение, не е взето.
+    private async Task DetectLateSignalAsync(CumulativeScore score, CancellationToken cancellationToken)
+    {
+        var reasons = new List<string>();
+
+        if (score.PriceChangePercent is { } changePercent && Math.Abs(changePercent) >= PriceReactionThresholdPercent)
+        {
+            var direction = changePercent > 0 ? "up" : "down";
+            reasons.Add($"Price already {direction} {Math.Abs(changePercent):0.0}% since first signal");
+        }
+
+        if (!string.IsNullOrWhiteSpace(score.Ticker))
+        {
+            var volumes = await _yahooFinanceService.GetDailyVolumesAsync(score.Ticker, cancellationToken);
+            if (volumes is not null && volumes.Count >= RecentVolumeWindowDays + BaselineVolumeWindowDays)
+            {
+                var orderedDates = volumes.Keys.OrderByDescending(d => d).ToList();
+                var recentAvg = orderedDates.Take(RecentVolumeWindowDays).Average(d => (decimal)volumes[d]);
+                var baselineAvg = orderedDates.Skip(RecentVolumeWindowDays).Take(BaselineVolumeWindowDays).Average(d => (decimal)volumes[d]);
+
+                if (baselineAvg > 0 && recentAvg / baselineAvg >= VolumeSpikeMultiplier)
+                {
+                    reasons.Add($"Trading volume {(recentAvg / baselineAvg):0.0}x above normal");
+                }
+            }
+        }
+
+        score.LateDetectionFlag = reasons.Count > 0;
+        score.LateDetectionReason = reasons.Count > 0 ? string.Join("; ", reasons) : null;
     }
 
     private async Task SaveShortlistSnapshotAsync(

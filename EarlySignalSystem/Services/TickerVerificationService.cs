@@ -76,16 +76,24 @@ public class TickerVerificationService : ITickerVerificationService
         ("Oslo", 7, "Norway"),
     ];
 
+    // Тикър, чиято последна реална сделка е по-стара от това, се третира като "мъртъв" — компанията
+    // не се верифицира с него (виж IsTickerLiquidAsync). Открито на живо: Sealed Air Corporation
+    // ("SEE") имаше валиден формат тикър, но нито Alpha Vantage (заседнал от 2026-04-09), нито Yahoo
+    // ("symbol may be delisted") имаха актуални данни — компанията реално е спряла да се търгува.
+    private const int StaleTickerThresholdDays = 14;
+
     private readonly AppDbContext _dbContext;
     private readonly HttpClient _httpClient;
     private readonly IConfiguration _configuration;
+    private readonly IYahooFinanceService _yahooFinanceService;
     private readonly ILogger<TickerVerificationService> _logger;
 
-    public TickerVerificationService(AppDbContext dbContext, HttpClient httpClient, IConfiguration configuration, ILogger<TickerVerificationService> logger)
+    public TickerVerificationService(AppDbContext dbContext, HttpClient httpClient, IConfiguration configuration, IYahooFinanceService yahooFinanceService, ILogger<TickerVerificationService> logger)
     {
         _dbContext = dbContext;
         _httpClient = httpClient;
         _configuration = configuration;
+        _yahooFinanceService = yahooFinanceService;
         _logger = logger;
     }
 
@@ -128,7 +136,7 @@ public class TickerVerificationService : ITickerVerificationService
                 try
                 {
                     var secTicker = TryGetSecTicker(company.CompanyName);
-                    if (secTicker is not null)
+                    if (secTicker is not null && await IsTickerLiquidAsync(secTicker, cancellationToken))
                     {
                         company.Ticker = secTicker;
                         company.Exchange = "United States";
@@ -233,7 +241,7 @@ public class TickerVerificationService : ITickerVerificationService
                         best = await SearchYahooAsync(company.TickerHint ?? company.CompanyName, cancellationToken);
                     }
 
-                    if (best is not null)
+                    if (best is not null && await IsTickerLiquidAsync(best.Symbol, cancellationToken))
                     {
                         company.Ticker = best.Symbol;
                         company.Exchange = best.ExchangeLabel;
@@ -243,7 +251,8 @@ public class TickerVerificationService : ITickerVerificationService
                         continue;
                     }
 
-                    // Нито един реален източник (SEC, AV, OpenFIGI) не намери нищо — последен опит
+                    // Нито един реален източник (SEC, AV, OpenFIGI) не намери нищо ЖИВО (или намереното
+                    // се оказа "мъртъв" тикър без скорошни сделки, виж IsTickerLiquidAsync) — последен опит
                     // през SEC-овия OTC fallback.
                     var secOtcTicker = TryGetSecOtcTicker(company.CompanyName);
                     if (secOtcTicker is not null)
@@ -618,6 +627,23 @@ public class TickerVerificationService : ITickerVerificationService
     private static readonly Regex IobTickerPattern = new(@"^\d.*\.LON$", RegexOptions.Compiled);
 
     private static bool IsLikelyIobTicker(string ticker) => IobTickerPattern.IsMatch(ticker);
+
+    // Проверява, че тикърът реално се търгува скоро (не просто "форматът изглежда правилно"). IsLikelyIobTicker
+    // хваща един конкретен, разпознаваем по формат случай (LSE IOB) — но "мъртви" тикъри могат да изглеждат
+    // напълно нормално (напр. "SEE" за Sealed Air — валиден 3-буквен NYSE формат, компанията просто реално е
+    // спряла да се търгува). GetDailyClosesAsync вече пропуска null close-ове (виж YahooFinanceService), затова
+    // най-скорошният КЛЮЧ в резултата директно е датата на последната реална сделка.
+    private async Task<bool> IsTickerLiquidAsync(string ticker, CancellationToken cancellationToken)
+    {
+        var series = await _yahooFinanceService.GetDailyClosesAsync(ticker, cancellationToken);
+        if (series is null || series.Count == 0)
+        {
+            return false;
+        }
+
+        var mostRecentTradeDate = series.Keys.Max();
+        return (DateTime.UtcNow.Date - mostRecentTradeDate).TotalDays <= StaleTickerThresholdDays;
+    }
 
     private static string NormalizeCompanyName(string name)
     {
